@@ -83,7 +83,7 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+# from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
@@ -121,12 +121,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
     # find checkpoint
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rl_games", train_task_name)
-        if not resume_path:
-            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
-            return
-    elif args_cli.checkpoint is None:
+    # if args_cli.use_pretrained_checkpoint:
+    #     resume_path = get_published_pretrained_checkpoint("rl_games", train_task_name)
+    #     if not resume_path:
+    #         print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
+    #         return
+    if args_cli.checkpoint is None:
         # specify directory for logging runs
         run_dir = agent_cfg["params"]["config"].get("full_experiment_name", ".*")
         # specify name of checkpoint
