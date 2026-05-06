@@ -78,7 +78,7 @@ class OpenArmTrayLiftEnvCfg(BimanualTrayLiftEnvCfg):
                 ),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(0.20, 0.0, 0.375),   # 支架顶面 z=0.36 上（支架 h=0.36，半厚 0.015）
+                pos=(0.28, 0.0, 0.375),   # x=0.28m: 远离基座，手臂向前伸展从侧接近托盘端
                 rot=(1.0, 0.0, 0.0, 0.0),
             ),
         )

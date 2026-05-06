@@ -48,11 +48,12 @@ class TrayLiftSceneCfg(InteractiveSceneCfg):
     tray: RigidObjectCfg = MISSING
 
     # 小支架：比托盘（12×60cm）更窄，仅用于托高托盘，不遮挡机械臂
-    # 支架顶面 z = 0.18 + 0.18 = 0.36m，托盘放在顶面 z = 0.375m
+    # 支架顶面 z = 0.18 + 0.18 = 0.36m
     # 支架 y 方向仅 20cm，托盘两端（y=±0.22m）完全暴露供手臂抓握
+    # x=0.28m：远离机器人基座，手臂需要向前伸展才能到达，自然从侧方接近托盘端部
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Stand",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.20, 0.0, 0.18]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.28, 0.0, 0.18]),
         spawn=sim_utils.CuboidCfg(
             size=(0.10, 0.20, 0.36),
             collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -233,6 +234,24 @@ class RewardsCfg:
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
             "side": "right",
             "half_length": 0.22,
+        },
+    )
+
+    # Phase 1 辅助：EE 高度对齐（引导夹爪从侧面正确接近，防止手臂从下方托推托盘）
+    left_ee_height = RewTerm(
+        func=mdp.ee_height_align_reward,
+        weight=2.0,
+        params={
+            "std": 0.05,
+            "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
+        },
+    )
+    right_ee_height = RewTerm(
+        func=mdp.ee_height_align_reward,
+        weight=2.0,
+        params={
+            "std": 0.05,
+            "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
         },
     )
 

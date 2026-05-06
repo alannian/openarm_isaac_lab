@@ -136,9 +136,10 @@ def finger_closure_reward(
 
     robot = env.scene[finger_cfg.name]
     finger_pos = robot.data.joint_pos[:, finger_cfg.joint_ids].mean(dim=1)
-    closed = finger_pos < 0.005  # 关节位置接近 0 = 完全闭合
+    closed = finger_pos < 0.015  # 关节位置小于 0.015 视为夹紧（容许夹住 3cm 厚托盘）
 
-    return (near.float() * closed.float()) + ((1 - near.float()) * (1 - closed.float()))
+    # 只在 EE 已靠近时奖励夹紧；远离时不给正奖励也不惩罚
+    return near.float() * closed.float()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -252,3 +253,26 @@ def hand_distance_reward(
     current_dist = torch.norm(left_pos - right_pos, dim=1)
     deviation = torch.abs(current_dist - target_distance) / target_distance
     return 1.0 - torch.tanh(deviation / std)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 9. EE 高度对齐奖励（防止从下方推托盘）
+# ─────────────────────────────────────────────────────────────────────
+
+def ee_height_align_reward(
+    env: ManagerBasedRLEnv,
+    std: float,
+    ee_frame_cfg: SceneEntityCfg,
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+) -> torch.Tensor:
+    """奖励 EE z 高度与托盘质心对齐，引导夹爪从侧面正确接近，防止从下方托推。
+
+    当 EE 高度与托盘中心高度误差在 std 范围内时奖励最高；
+    偏低（从下方推）和偏高（从上方压）均减少奖励。
+    """
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_z = ee_frame.data.target_pos_w[..., 0, 2]
+    tray: RigidObject = env.scene[tray_cfg.name]
+    tray_z = tray.data.root_pos_w[:, 2]
+    z_err = torch.abs(ee_z - tray_z)
+    return 1.0 - torch.tanh(z_err / std)
