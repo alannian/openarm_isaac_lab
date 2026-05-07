@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
+from isaaclab.assets import Articulation
 from isaaclab.utils.math import quat_apply
 
 if TYPE_CHECKING:
@@ -287,7 +288,44 @@ def ee_height_align_reward(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 10. 条件门控举升奖励（阶段B核心：只有夹住才能得举升奖励）
+# 10. 夹爪朝向对齐奖励（Stage A 核心：强迫夹爪以正确姿态接近托盘）
+# ─────────────────────────────────────────────────────────────────────
+
+def ee_grasp_orientation_reward(
+    env: ManagerBasedRLEnv,
+    ee_body_cfg: SceneEntityCfg,
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+) -> torch.Tensor:
+    """奖励夹爪开合轴（EE 局部 Z 轴）与世界 Z 轴对齐。
+
+    物理含义：
+    - OpenArm 夹爪的两根手指沿 EE 局部 Z 轴方向开合
+    - 正确夹取托盘（厚 0.03m）时，手指上下分布，开合轴必须竖直（与世界Z轴平行）
+    - "侧面举"时开合轴是水平的，该奖励值接近 0
+
+    计算方式：
+        ee_local_z 在世界系的 z 分量 = |world_z · ee_local_z_in_world|
+        当完全对齐（竖直夹）时该值 = 1.0
+        当开合轴水平时该值 ≈ 0
+
+    返回值范围 [0, 1]，仅奖励朝向，不依赖位置。
+    """
+    robot: Articulation = env.scene[ee_body_cfg.name]
+    # body_quat_w shape: (N, num_bodies, 4) wxyz
+    ee_quat = robot.data.body_quat_w[:, ee_body_cfg.body_ids[0], :]   # (N, 4)
+
+    # 将 EE 局部 Z 轴 (0,0,1) 变换到世界系
+    local_z = torch.zeros(ee_quat.shape[0], 3, device=ee_quat.device)
+    local_z[:, 2] = 1.0
+    world_z_of_ee = quat_apply(ee_quat, local_z)  # (N, 3)
+
+    # 与世界 Z 轴的对齐度：点积绝对值（考虑夹爪可能 +Z 或 -Z 向上）
+    alignment = torch.abs(world_z_of_ee[:, 2])   # (N,)  范围 [0, 1]
+    return alignment
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 11. 条件门控举升奖励（阶段B核心：只有夹住才能得举升奖励）
 # ─────────────────────────────────────────────────────────────────────
 
 def tray_is_lifted_grasped(
