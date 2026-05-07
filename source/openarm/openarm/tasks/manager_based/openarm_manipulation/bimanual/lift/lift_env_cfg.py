@@ -491,6 +491,6 @@ class BimanualTrayLiftEnvCfg(ManagerBasedRLEnvCfg):
 
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
+        self.sim.physx.gpu_total_aggregate_pairs_capacity = 32 * 1024   # 8192 envs 需要 ~16400，翻倍留余量
         self.sim.physx.friction_correlation_distance = 0.00625
 
