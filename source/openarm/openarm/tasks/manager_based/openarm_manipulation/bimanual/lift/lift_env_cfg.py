@@ -212,32 +212,50 @@ class EventCfg:
 # 奖励
 ##
 
+# 公共参数：抓握判定用
+_GRASP_DIST = 0.08   # EE 距离托盘端点多近算"抓住"（稍宽松，避免门控太严苛）
+_HALF_LEN   = 0.22   # 托盘抓握点偏移量（托盘半长 0.30m，抓握点向内 8cm）
+_LEFT_FINGER_CFG  = SceneEntityCfg("robot", joint_names=["openarm_left_finger_joint.*"])
+_RIGHT_FINGER_CFG = SceneEntityCfg("robot", joint_names=["openarm_right_finger_joint.*"])
+
 @configclass
 class RewardsCfg:
-    """奖励项配置。"""
-    # Phase 1：靠近（half_length=0.22：抓握点在托盘两端往内 8cm，在确认工作空间 y=±0.22m 内）
+    """奖励项配置：两阶段课程学习设计。
+
+    阶段A（0 ~ ~1200 iter）：
+        - 举升相关奖励权重初始为 0，策略专注学会双臂靠近 + 夹爪夹住
+        - 接近奖励权重大幅提升，确保探索效率
+
+    阶段B（~1200 iter 起，由课程自动线性激活）：
+        - 举升奖励通过 tray_is_lifted_grasped 和 tray_goal_height_tracking_grasped
+          施加门控：必须双手夹住托盘才能获得举升奖励，彻底堵死"推托盘"捷径
+        - 课程学习在 60000 步内将举升奖励从 0 线性增长到目标权重
+    """
+    # ── 阶段A：接近与抓取（全程有效，权重较大） ──────────────────────
+
+    # Phase 1：靠近（half_length=0.22，抓握点在托盘两端往内 8cm）
     left_reach_tray = RewTerm(
         func=mdp.ee_reach_tray_end,
-        weight=1.5,
+        weight=3.0,   # 提升至 3.0，早期探索更强
         params={
             "std": 0.1,
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
             "side": "left",
-            "half_length": 0.22,
+            "half_length": _HALF_LEN,
         },
     )
     right_reach_tray = RewTerm(
         func=mdp.ee_reach_tray_end,
-        weight=1.5,
+        weight=3.0,
         params={
             "std": 0.1,
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
             "side": "right",
-            "half_length": 0.22,
+            "half_length": _HALF_LEN,
         },
     )
 
-    # Phase 1 辅助：EE 高度对齐（引导夹爪从侧面正确接近，防止手臂从下方托推托盘）
+    # Phase 1 辅助：EE 高度对齐（防止手臂从下方托推托盘）
     left_ee_height = RewTerm(
         func=mdp.ee_height_align_reward,
         weight=2.0,
@@ -255,61 +273,91 @@ class RewardsCfg:
         },
     )
 
-    # Phase 2：双手同时接触
+    # Phase 2：双手同时接触（权重提升，强化联合抓取）
     grasp_both_ends = RewTerm(
         func=mdp.grasp_both_ends,
-        weight=5.0,
+        weight=10.0,  # 从 5.0 提升至 10.0，使联合抓取成为最强奖励信号
         params={
-            "distance_threshold": 0.06,
+            "distance_threshold": _GRASP_DIST,
             "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
-            "half_length": 0.22,
+            "half_length": _HALF_LEN,
         },
     )
     left_finger_closure = RewTerm(
         func=mdp.finger_closure_reward,
-        weight=0.5,
+        weight=2.0,   # 从 0.5 提升至 2.0，强制夹爪学会夹紧
         params={
-            "distance_threshold": 0.06,
+            "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
-            "finger_cfg": SceneEntityCfg("robot", joint_names=["openarm_left_finger_joint.*"]),
+            "finger_cfg": _LEFT_FINGER_CFG,
             "side": "left",
-            "half_length": 0.22,
+            "half_length": _HALF_LEN,
         },
     )
     right_finger_closure = RewTerm(
         func=mdp.finger_closure_reward,
-        weight=0.5,
+        weight=2.0,
         params={
-            "distance_threshold": 0.06,
+            "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
-            "finger_cfg": SceneEntityCfg("robot", joint_names=["openarm_right_finger_joint.*"]),
+            "finger_cfg": _RIGHT_FINGER_CFG,
             "side": "right",
-            "half_length": 0.22,
+            "half_length": _HALF_LEN,
         },
     )
 
-    # Phase 3：举起（托盘初始在 z=0.375，举离支架顶面 z>0.40 才算起，目标举到 z=0.52）
+    # ── 阶段B：举升（初始权重=0，由课程学习线性激活） ─────────────────
+    # 关键设计：使用门控版本，必须双手夹住才能获得举升奖励
+
     tray_lifted = RewTerm(
-        func=mdp.tray_is_lifted,
-        weight=20.0,
-        params={"minimal_height": 0.40},
+        func=mdp.tray_is_lifted_grasped,
+        weight=0.0,   # 初始为 0，由课程学习激活到 20.0
+        params={
+            "minimal_height": 0.40,
+            "grasp_distance_threshold": _GRASP_DIST,
+            "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
+            "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "left_finger_cfg": _LEFT_FINGER_CFG,
+            "right_finger_cfg": _RIGHT_FINGER_CFG,
+            "half_length": _HALF_LEN,
+        },
     )
     tray_goal_height = RewTerm(
-        func=mdp.tray_goal_height_tracking,
-        weight=16.0,
-        params={"target_height": 0.52, "std": 0.1, "minimal_height": 0.40},
+        func=mdp.tray_goal_height_tracking_grasped,
+        weight=0.0,   # 初始为 0，由课程学习激活到 16.0
+        params={
+            "target_height": 0.52,
+            "std": 0.1,
+            "minimal_height": 0.40,
+            "grasp_distance_threshold": _GRASP_DIST,
+            "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
+            "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "left_finger_cfg": _LEFT_FINGER_CFG,
+            "right_finger_cfg": _RIGHT_FINGER_CFG,
+            "half_length": _HALF_LEN,
+        },
     )
     tray_goal_height_fine = RewTerm(
-        func=mdp.tray_goal_height_tracking,
-        weight=5.0,
-        params={"target_height": 0.52, "std": 0.03, "minimal_height": 0.40},
+        func=mdp.tray_goal_height_tracking_grasped,
+        weight=0.0,   # 初始为 0，由课程学习激活到 5.0
+        params={
+            "target_height": 0.52,
+            "std": 0.03,
+            "minimal_height": 0.40,
+            "grasp_distance_threshold": _GRASP_DIST,
+            "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
+            "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "left_finger_cfg": _LEFT_FINGER_CFG,
+            "right_finger_cfg": _RIGHT_FINGER_CFG,
+            "half_length": _HALF_LEN,
+        },
     )
 
-    # Phase 4：协同约束
+    # ── 阶段B：协同约束（初始权重=0，由课程学习激活） ────────────────
     grasp_symmetry = RewTerm(
         func=mdp.grasp_symmetry_penalty,
-        weight=-2.0,
+        weight=0.0,   # 初始为 0，由课程学习激活到 -2.0
         params={
             "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
@@ -317,7 +365,7 @@ class RewardsCfg:
     )
     tray_tilt = RewTerm(
         func=mdp.tray_tilt_penalty,
-        weight=-3.0,
+        weight=0.0,   # 初始为 0，由课程学习激活到 -3.0
         params={"max_tilt_rad": 0.1},
     )
     hand_distance = RewTerm(
@@ -331,7 +379,7 @@ class RewardsCfg:
         },
     )
 
-    # 平滑性惩罚
+    # ── 平滑性惩罚（全程，初始很小，课程学习逐步增大） ──────────────
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
     left_joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
@@ -355,11 +403,15 @@ class RewardsCfg:
 
 @configclass
 class TerminationsCfg:
-    """终止条件配置。"""
+    """终止条件配置。
+
+    注意：阶段A（学夹取）期间 tray_dropped 的阈值设得更低（0.30），
+    避免因托盘轻微晃动就终止 episode，给策略更多时间学习夹取行为。
+    """
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     tray_dropped = DoneTerm(
         func=mdp.tray_dropped,
-        params={"minimum_height": 0.33, "tray_cfg": SceneEntityCfg("tray")},
+        params={"minimum_height": 0.30, "tray_cfg": SceneEntityCfg("tray")},
     )
 
 
@@ -369,7 +421,38 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    """课程学习配置：逐步提高平滑性惩罚权重。"""
+    """两阶段课程学习配置。
+
+    阶段A → 阶段B 切换：
+        - tray_lifted / tray_goal_height / tray_goal_height_fine 从 0 线性增长
+        - 增长在 60000 步（约 1200 iter × 48 steps）内完成
+        - 同期 grasp_symmetry / tray_tilt 也从 0 激活，确保举升质量
+
+    平滑性惩罚：在 20000 步内从初始值增大，与之前保持一致。
+    """
+    # ── 阶段B 激活：举升奖励从 0 线性增长 ────────────────────────────
+    activate_tray_lifted = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "tray_lifted", "weight": 20.0, "num_steps": 60000},
+    )
+    activate_tray_goal_height = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "tray_goal_height", "weight": 16.0, "num_steps": 60000},
+    )
+    activate_tray_goal_height_fine = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "tray_goal_height_fine", "weight": 5.0, "num_steps": 60000},
+    )
+    activate_grasp_symmetry = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "grasp_symmetry", "weight": -2.0, "num_steps": 60000},
+    )
+    activate_tray_tilt = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "tray_tilt", "weight": -3.0, "num_steps": 60000},
+    )
+
+    # ── 平滑性惩罚逐步增大 ───────────────────────────────────────────
     action_rate = CurrTerm(
         func=mdp.modify_reward_weight,
         params={"term_name": "action_rate", "weight": -5e-3, "num_steps": 20000},
@@ -410,3 +493,4 @@ class BimanualTrayLiftEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
         self.sim.physx.friction_correlation_distance = 0.00625
+

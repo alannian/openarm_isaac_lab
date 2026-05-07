@@ -132,14 +132,21 @@ def finger_closure_reward(
     left_end, right_end = _get_tray_ends(env, tray_cfg, half_length)
     target = left_end if side == "left" else right_end
 
-    near = torch.norm(ee_pos - target, dim=1) < distance_threshold  # bool (N,)
+    dist = torch.norm(ee_pos - target, dim=1)
+    # 连续接近信号（tanh 核，EE 越靠近托盘端点奖励越高）
+    approach = 1.0 - torch.tanh(dist / distance_threshold)
 
     robot = env.scene[finger_cfg.name]
     finger_pos = robot.data.joint_pos[:, finger_cfg.joint_ids].mean(dim=1)
-    closed = finger_pos < 0.015  # 关节位置小于 0.015 视为夹紧（容许夹住 3cm 厚托盘）
+    # 高斯夹取信号，峰值在 0.015m（托盘厚 0.03m → 每指阻挡位约 0.015m）
+    # 物理含义：
+    #   finger_pos ≈ 0.044  → 完全张开，奖励 ≈ 0
+    #   finger_pos ≈ 0.015  → 托盘在手指之间，真实夹住，奖励 = 1.0
+    #   finger_pos ≈ 0.000  → 空握（没夹住任何东西），奖励 ≈ 0.011 ≈ 0
+    grip_signal = torch.exp(-0.5 * ((finger_pos - 0.015) / 0.005) ** 2)
 
-    # 只在 EE 已靠近时奖励夹紧；远离时不给正奖励也不惩罚
-    return near.float() * closed.float()
+    # 越靠近 + 越精确夹住托盘，奖励越高
+    return approach * grip_signal
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -260,6 +267,7 @@ def hand_distance_reward(
 # ─────────────────────────────────────────────────────────────────────
 
 def ee_height_align_reward(
+
     env: ManagerBasedRLEnv,
     std: float,
     ee_frame_cfg: SceneEntityCfg,
@@ -276,3 +284,90 @@ def ee_height_align_reward(
     tray_z = tray.data.root_pos_w[:, 2]
     z_err = torch.abs(ee_z - tray_z)
     return 1.0 - torch.tanh(z_err / std)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 10. 条件门控举升奖励（阶段B核心：只有夹住才能得举升奖励）
+# ─────────────────────────────────────────────────────────────────────
+
+def tray_is_lifted_grasped(
+    env: ManagerBasedRLEnv,
+    minimal_height: float,
+    grasp_distance_threshold: float,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_length: float = 0.22,
+) -> torch.Tensor:
+    """门控举升奖励：必须同时满足双手已夹住托盘 + 托盘高于阈值，才给 1.0。
+
+    这是两阶段课程学习的关键——策略无法通过手臂推托盘来获得举升奖励，
+    必须先学会夹住再举起。
+    """
+    tray: RigidObject = env.scene[tray_cfg.name]
+    tray_z = tray.data.root_pos_w[:, 2]
+
+    # 条件1：托盘被举离支架
+    is_lifted = tray_z > minimal_height
+
+    # 条件2：左手夹住（EE靠近 + 夹爪闭合）
+    left_ee: FrameTransformer = env.scene[left_ee_cfg.name]
+    left_pos = left_ee.data.target_pos_w[..., 0, :]
+    left_end, right_end = _get_tray_ends(env, tray_cfg, half_length)
+    left_near = torch.norm(left_pos - left_end, dim=1) < grasp_distance_threshold
+    left_robot = env.scene[left_finger_cfg.name]
+    left_finger = left_robot.data.joint_pos[:, left_finger_cfg.joint_ids].mean(dim=1)
+    # 范围 (0.005, 0.030) 表示托盘在手指之间
+    # 空握=0.0（不在范围内），真实夹住≈0.015（在范围内），张开=0.044（不在范围内）
+    left_gripping = (left_finger > 0.005) & (left_finger < 0.030)
+
+    # 条件3：右手夹住（EE靠近 + 夹爪实际夹住托盘）
+    right_ee: FrameTransformer = env.scene[right_ee_cfg.name]
+    right_pos = right_ee.data.target_pos_w[..., 0, :]
+    right_near = torch.norm(right_pos - right_end, dim=1) < grasp_distance_threshold
+    right_robot = env.scene[right_finger_cfg.name]
+    right_finger = right_robot.data.joint_pos[:, right_finger_cfg.joint_ids].mean(dim=1)
+    right_gripping = (right_finger > 0.005) & (right_finger < 0.030)
+
+    grasped = left_near & left_gripping & right_near & right_gripping
+    return (is_lifted & grasped).float()
+
+
+def tray_goal_height_tracking_grasped(
+    env: ManagerBasedRLEnv,
+    target_height: float,
+    std: float,
+    grasp_distance_threshold: float,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
+    minimal_height: float = 0.40,
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_length: float = 0.22,
+) -> torch.Tensor:
+    """门控高度追踪奖励：只有双手夹住时才奖励高度追踪。"""
+    tray: RigidObject = env.scene[tray_cfg.name]
+    tray_z = tray.data.root_pos_w[:, 2]
+    height_err = torch.abs(tray_z - target_height)
+    is_lifted = (tray_z > minimal_height).float()
+
+    left_ee: FrameTransformer = env.scene[left_ee_cfg.name]
+    left_pos = left_ee.data.target_pos_w[..., 0, :]
+    left_end, right_end = _get_tray_ends(env, tray_cfg, half_length)
+    left_near = torch.norm(left_pos - left_end, dim=1) < grasp_distance_threshold
+    left_robot = env.scene[left_finger_cfg.name]
+    left_finger = left_robot.data.joint_pos[:, left_finger_cfg.joint_ids].mean(dim=1)
+    left_gripping = (left_finger > 0.005) & (left_finger < 0.030)
+
+    right_ee: FrameTransformer = env.scene[right_ee_cfg.name]
+    right_pos = right_ee.data.target_pos_w[..., 0, :]
+    right_near = torch.norm(right_pos - right_end, dim=1) < grasp_distance_threshold
+    right_robot = env.scene[right_finger_cfg.name]
+    right_finger = right_robot.data.joint_pos[:, right_finger_cfg.joint_ids].mean(dim=1)
+    right_gripping = (right_finger > 0.005) & (right_finger < 0.030)
+
+    grasped = (left_near & left_gripping & right_near & right_gripping).float()
+    return is_lifted * grasped * (1.0 - torch.tanh(height_err / std))
