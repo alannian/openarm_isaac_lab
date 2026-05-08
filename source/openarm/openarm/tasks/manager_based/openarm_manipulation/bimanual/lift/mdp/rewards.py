@@ -296,32 +296,47 @@ def ee_grasp_orientation_reward(
     ee_body_cfg: SceneEntityCfg,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
 ) -> torch.Tensor:
-    """奖励夹爪开合轴（EE 局部 Z 轴）与世界 Z 轴对齐。
+    """奖励夹爪以正确姿态接近托盘（水平插入，上下夹住）。
 
-    物理含义：
-    - OpenArm 夹爪的两根手指沿 EE 局部 Z 轴方向开合
-    - 正确夹取托盘（厚 0.03m）时，手指上下分布，开合轴必须竖直（与世界Z轴平行）
-    - "侧面举"时开合轴是水平的，该奖励值接近 0
+    托盘是水平放置的薄板（厚 3cm），正确夹取需要：
+      - EE 局部 Z 轴（进入/接近方向）水平 → 从托盘端面侧向插入
+      - EE 局部 X 或 Y 轴（手指开合方向）竖直 → 一指在托盘上方，一指在下方
 
-    计算方式：
-        ee_local_z 在世界系的 z 分量 = |world_z · ee_local_z_in_world|
-        当完全对齐（竖直夹）时该值 = 1.0
-        当开合轴水平时该值 ≈ 0
+    错误行为（之前的设计）：
+      - EE Z 轴朝下 → 夹爪像抓柱子一样从上方插入，无法夹住水平薄板
 
-    返回值范围 [0, 1]，仅奖励朝向，不依赖位置。
+    计算两个正交约束：
+      1. horizontal_approach = 1 - |world_z_of_ee_Z_component|  （接近轴应水平，z分量应≈0）
+      2. vertical_opening    = max(|world_z_of_ee_X_component|, |world_z_of_ee_Y_component|)
+                                 （开合轴应竖直，X或Y中必须有一个z分量≈1）
+
+    两者之积：仅当接近方向正确且开合方向正确时，奖励才接近 1.0。
     """
     robot: Articulation = env.scene[ee_body_cfg.name]
-    # body_quat_w shape: (N, num_bodies, 4) wxyz
-    ee_quat = robot.data.body_quat_w[:, ee_body_cfg.body_ids[0], :]   # (N, 4)
+    ee_quat = robot.data.body_quat_w[:, ee_body_cfg.body_ids[0], :]   # (N, 4) wxyz
 
-    # 将 EE 局部 Z 轴 (0,0,1) 变换到世界系
-    local_z = torch.zeros(ee_quat.shape[0], 3, device=ee_quat.device)
-    local_z[:, 2] = 1.0
-    world_z_of_ee = quat_apply(ee_quat, local_z)  # (N, 3)
+    # 把 EE 三个局部轴分别变换到世界系
+    local_x = torch.zeros(ee_quat.shape[0], 3, device=ee_quat.device)
+    local_x[:, 0] = 1.0
+    local_y = torch.zeros_like(local_x); local_y[:, 1] = 1.0
+    local_z = torch.zeros_like(local_x); local_z[:, 2] = 1.0
 
-    # 与世界 Z 轴的对齐度：点积绝对值（考虑夹爪可能 +Z 或 -Z 向上）
-    alignment = torch.abs(world_z_of_ee[:, 2])   # (N,)  范围 [0, 1]
-    return alignment
+    world_x = quat_apply(ee_quat, local_x)   # (N, 3)
+    world_y = quat_apply(ee_quat, local_y)
+    world_z = quat_apply(ee_quat, local_z)
+
+    # 约束1：进入方向（EE Z）必须水平 → 其世界系 z 分量应接近 0
+    horizontal_approach = 1.0 - torch.abs(world_z[:, 2])   # (N,)
+
+    # 约束2：开合方向（EE X 或 Y）必须竖直 → 其世界系 z 分量的绝对值应接近 1
+    # 取 X、Y 中 z 分量较大的那个（不用事先知道哪个轴是开合轴）
+    vertical_opening = torch.max(
+        torch.abs(world_x[:, 2]),
+        torch.abs(world_y[:, 2]),
+    )   # (N,)
+
+    # 两个约束同时满足才能得高分
+    return horizontal_approach * vertical_opening
 
 
 # ─────────────────────────────────────────────────────────────────────
