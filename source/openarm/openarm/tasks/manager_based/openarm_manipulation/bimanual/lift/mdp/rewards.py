@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
-from isaaclab.assets import Articulation
 from isaaclab.utils.math import quat_apply
 
 if TYPE_CHECKING:
@@ -288,55 +287,54 @@ def ee_height_align_reward(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 10. 夹爪朝向对齐奖励（Stage A 核心：强迫夹爪以正确姿态接近托盘）
+# 10. EE 水平接近方向奖励（不依赖 EE 轴约定，纯位置几何）
 # ─────────────────────────────────────────────────────────────────────
 
-def ee_grasp_orientation_reward(
+def ee_approach_direction_reward(
     env: ManagerBasedRLEnv,
-    ee_body_cfg: SceneEntityCfg,
+    ee_frame_cfg: SceneEntityCfg,
+    side: str,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_length: float = 0.22,
 ) -> torch.Tensor:
-    """奖励夹爪以正确姿态接近托盘（水平插入，上下夹住）。
+    """奖励 EE 从托盘端面外侧沿托盘 Y 轴方向水平接近。
 
-    托盘是水平放置的薄板（厚 3cm），正确夹取需要：
-      - EE 局部 Z 轴（进入/接近方向）水平 → 从托盘端面侧向插入
-      - EE 局部 X 或 Y 轴（手指开合方向）竖直 → 一指在托盘上方，一指在下方
+    正确的接近方向唯一确定：
+      - 左臂：从 +Y 方向接近 +Y 端（displacement 朝 +Y）
+      - 右臂：从 -Y 方向接近 -Y 端（displacement 朝 -Y）
+      - 两臂接近方向都沿托盘长轴（Y 轴），不从 X 方向或 Z 方向接近
 
-    错误行为（之前的设计）：
-      - EE Z 轴朝下 → 夹爪像抓柱子一样从上方插入，无法夹住水平薄板
+    两个正交约束的乘积：
+      1. horizontal：Z 分量小 → 不从上下接近
+      2. along_tray_y：位移方向与托盘 Y 轴对齐 → 从端面正外侧接近，不从托盘侧面(X)接近
 
-    计算两个正交约束：
-      1. horizontal_approach = 1 - |world_z_of_ee_Z_component|  （接近轴应水平，z分量应≈0）
-      2. vertical_opening    = max(|world_z_of_ee_X_component|, |world_z_of_ee_Y_component|)
-                                 （开合轴应竖直，X或Y中必须有一个z分量≈1）
-
-    两者之积：仅当接近方向正确且开合方向正确时，奖励才接近 1.0。
+    只有同时满足"水平 + 沿Y轴"，两个约束才都接近 1.0。
+    这确保了左右手臂的接近方向完全镜像对称。
     """
-    robot: Articulation = env.scene[ee_body_cfg.name]
-    ee_quat = robot.data.body_quat_w[:, ee_body_cfg.body_ids[0], :]   # (N, 4) wxyz
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_pos = ee_frame.data.target_pos_w[..., 0, :]   # (N, 3)
 
-    # 把 EE 三个局部轴分别变换到世界系
-    local_x = torch.zeros(ee_quat.shape[0], 3, device=ee_quat.device)
-    local_x[:, 0] = 1.0
-    local_y = torch.zeros_like(local_x); local_y[:, 1] = 1.0
-    local_z = torch.zeros_like(local_x); local_z[:, 2] = 1.0
+    tray: RigidObject = env.scene[tray_cfg.name]
+    tray_quat = tray.data.root_quat_w                # (N, 4) wxyz
 
-    world_x = quat_apply(ee_quat, local_x)   # (N, 3)
-    world_y = quat_apply(ee_quat, local_y)
-    world_z = quat_apply(ee_quat, local_z)
+    left_end, right_end = _get_tray_ends(env, tray_cfg, half_length)
+    target = left_end if side == "left" else right_end
 
-    # 约束1：进入方向（EE Z）必须水平 → 其世界系 z 分量应接近 0
-    horizontal_approach = 1.0 - torch.abs(world_z[:, 2])   # (N,)
+    displacement = ee_pos - target                                       # (N, 3)
+    dist = torch.norm(displacement, dim=1, keepdim=True).clamp(min=1e-6)
+    normalized = displacement / dist                                     # (N, 3) 单位向量
 
-    # 约束2：开合方向（EE X 或 Y）必须竖直 → 其世界系 z 分量的绝对值应接近 1
-    # 取 X、Y 中 z 分量较大的那个（不用事先知道哪个轴是开合轴）
-    vertical_opening = torch.max(
-        torch.abs(world_x[:, 2]),
-        torch.abs(world_y[:, 2]),
-    )   # (N,)
+    # 约束1：水平接近（Z 分量小）
+    horizontal = 1.0 - torch.abs(normalized[:, 2])   # (N,)
 
-    # 两个约束同时满足才能得高分
-    return horizontal_approach * vertical_opening
+    # 约束2：沿托盘 Y 轴方向接近（|dot(normalized, tray_Y_world)| 大）
+    # 托盘局部 +Y 轴在世界系的方向
+    local_y = torch.zeros(ee_pos.shape[0], 3, device=ee_pos.device)
+    local_y[:, 1] = 1.0
+    tray_y_world = quat_apply(tray_quat, local_y)    # (N, 3)
+    along_tray_y = torch.abs((normalized * tray_y_world).sum(dim=1))    # (N,)
+
+    return horizontal * along_tray_y
 
 
 # ─────────────────────────────────────────────────────────────────────

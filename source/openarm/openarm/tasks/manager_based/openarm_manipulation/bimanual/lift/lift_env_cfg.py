@@ -309,20 +309,25 @@ class RewardsCfg:
         },
     )
 
-    # Phase 2 核心新增：夹爪朝向对齐（强迫夹爪竖直朝向，防止侧面举托盘）
-    # 夹爪开合轴（EE 局部 Z 轴）必须与世界 Z 轴对齐才能夹住厚 3cm 的托盘
+    # Phase 2 辅助：EE 水平接近方向（奖励从侧面进入，不从上/下插入）
+    # 计算 EE 到目标点的位移向量，Z 分量越小 → 接近方向越水平 → 奖励越高
+    # 不依赖 EE 轴约定，避免之前因轴方向猜测错误导致的怪异姿态
     left_grasp_orientation = RewTerm(
-        func=mdp.ee_grasp_orientation_reward,
-        weight=4.0,   # 高权重：是区分"夹取"和"侧举"的最关键约束
+        func=mdp.ee_approach_direction_reward,
+        weight=2.0,
         params={
-            "ee_body_cfg": SceneEntityCfg("robot", body_names=["openarm_left_hand"]),
+            "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
+            "side": "left",
+            "half_length": _HALF_LEN,
         },
     )
     right_grasp_orientation = RewTerm(
-        func=mdp.ee_grasp_orientation_reward,
-        weight=4.0,
+        func=mdp.ee_approach_direction_reward,
+        weight=2.0,
         params={
-            "ee_body_cfg": SceneEntityCfg("robot", body_names=["openarm_right_hand"]),
+            "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
+            "side": "right",
+            "half_length": _HALF_LEN,
         },
     )
 
