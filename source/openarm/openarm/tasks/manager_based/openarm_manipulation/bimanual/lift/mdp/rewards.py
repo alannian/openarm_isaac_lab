@@ -139,10 +139,19 @@ def finger_closure_reward(
     robot = env.scene[finger_cfg.name]
     finger_pos = robot.data.joint_pos[:, finger_cfg.joint_ids].mean(dim=1)
     # 高斯夹取信号，峰值在 0.015m（托盘厚 0.03m → 每指阻挡位约 0.015m）
-    # 物理含义：
-    #   finger_pos ≈ 0.044  → 完全张开，奖励 ≈ 0
-    #   finger_pos ≈ 0.015  → 托盘在手指之间，真实夹住，奖励 = 1.0
-    #   finger_pos ≈ 0.000  → 空握（没夹住任何东西），奖励 ≈ 0.011 ≈ 0
+    #
+    # 为什么 std=0.005 是正确的（而不是更大的值）：
+    #   BinaryJointPositionActionCfg 是二值夹爪，finger_pos 实际上只有三种稳态：
+    #     0.044m（张开）/ 0.015m（被托盘阻挡）/ 0.000m（空握，无阻挡）
+    #   PPO 通过 advantage 学习选 open 还是 close，不需要对 finger_pos 做连续梯度。
+    #
+    # 物理含义（std=0.005）：
+    #   finger_pos ≈ 0.044  → 完全张开（open 指令），奖励 ≈ 0.003 ≈ 0  ✓
+    #   finger_pos ≈ 0.015  → 被托盘阻挡（close 指令 + 托盘在手指间），奖励 = 1.0  ✓
+    #   finger_pos ≈ 0.000  → 空握（close 指令 + 无托盘），奖励 ≈ 0.011 ≈ 0  ✓
+    #
+    # std=0.010 时空握（0.000m）会给 0.325 奖励 —— 策略可以靠近托盘端部+空握获得假阳性奖励！
+    # std=0.005 才能正确区分"被阻挡（有托盘）"和"空握（无托盘）"这两种物理状态。
     grip_signal = torch.exp(-0.5 * ((finger_pos - 0.015) / 0.005) ** 2)
 
     # 越靠近 + 越精确夹住托盘，奖励越高

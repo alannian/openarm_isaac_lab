@@ -236,7 +236,7 @@ class RewardsCfg:
     # Phase 1：靠近（half_length=0.22，抓握点在托盘两端往内 8cm）
     left_reach_tray = RewTerm(
         func=mdp.ee_reach_tray_end,
-        weight=3.0,   # 提升至 3.0，早期探索更强
+        weight=2.0,   # 从 3.0 降到 2.0，给高度对齐腾出奖励空间
         params={
             "std": 0.1,
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
@@ -246,7 +246,7 @@ class RewardsCfg:
     )
     right_reach_tray = RewTerm(
         func=mdp.ee_reach_tray_end,
-        weight=3.0,
+        weight=2.0,
         params={
             "std": 0.1,
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
@@ -255,22 +255,23 @@ class RewardsCfg:
         },
     )
 
-    # Phase 1 辅助：EE 高度对齐（std = 托盘半厚度 1.5cm）
-    # 关键几何约束：EE 中心必须在 tray_z ± 1.5cm 内，才能保证一根手指在托盘上面、一根在下面
-    # std=0.05 时 EE 偏 3.5cm 仍有奖励（两指全在托盘同侧），必须收紧到 0.015
+    # Phase 1 辅助：EE 高度对齐
+    # 关键几何约束：EE 中心必须在 tray_z ± 一定范围内，才能保证一根手指在托盘上面、一根在下面
+    # std=0.015 时在 z_err=3cm 处奖励仅 0.04（梯度消失），策略无法纠正高度
+    # std=0.04 时在 z_err=3cm 处奖励为 0.38，梯度有意义，训练可以收敛
     left_ee_height = RewTerm(
         func=mdp.ee_height_align_reward,
-        weight=3.0,   # 权重提升：高度对齐是「一上一下」的直接保证
+        weight=4.0,   # 提升权重：高度对齐是能否抓住的关键前提
         params={
-            "std": 0.015,  # = 托盘半厚度，EE 偏超过此值时手指无法跨越托盘
+            "std": 0.04,  # 从 0.015 改为 0.04：给早期训练足够的梯度覆盖范围
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
         },
     )
     right_ee_height = RewTerm(
         func=mdp.ee_height_align_reward,
-        weight=3.0,
+        weight=4.0,
         params={
-            "std": 0.015,
+            "std": 0.04,
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
         },
     )
@@ -288,7 +289,7 @@ class RewardsCfg:
     )
     left_finger_closure = RewTerm(
         func=mdp.finger_closure_reward,
-        weight=2.0,   # 从 0.5 提升至 2.0，强制夹爪学会夹紧
+        weight=4.0,   # 从 2.0 提升至 4.0：夹取奖励需与 grasp_both_ends 同量级才足以打破"悬停"局部最优
         params={
             "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
@@ -299,7 +300,7 @@ class RewardsCfg:
     )
     right_finger_closure = RewTerm(
         func=mdp.finger_closure_reward,
-        weight=2.0,
+        weight=4.0,
         params={
             "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
@@ -314,7 +315,7 @@ class RewardsCfg:
     # 不依赖 EE 轴约定，避免之前因轴方向猜测错误导致的怪异姿态
     left_grasp_orientation = RewTerm(
         func=mdp.ee_approach_direction_reward,
-        weight=2.0,
+        weight=3.0,   # 从 2.0 提升到 3.0：接近方向是确保托盘在手指之间的第二关键约束
         params={
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
             "side": "left",
@@ -323,7 +324,7 @@ class RewardsCfg:
     )
     right_grasp_orientation = RewTerm(
         func=mdp.ee_approach_direction_reward,
-        weight=2.0,
+        weight=3.0,
         params={
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
             "side": "right",
