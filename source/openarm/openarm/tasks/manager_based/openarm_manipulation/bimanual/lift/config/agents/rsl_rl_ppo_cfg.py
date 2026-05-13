@@ -23,8 +23,8 @@ from isaaclab.utils import configclass
 
 @configclass
 class OpenArmTrayLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 48
-    max_iterations = 3000
+    num_steps_per_env = 64
+    max_iterations = 4000
     save_interval = 100
     experiment_name = "openarm_bi_tray_lift"
     run_name = ""
@@ -32,21 +32,21 @@ class OpenArmTrayLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
-        actor_hidden_dims=[256, 128, 64],
-        critic_hidden_dims=[256, 128, 64],
+        actor_hidden_dims=[128, 128, 64],
+        critic_hidden_dims=[128, 128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
-        num_learning_epochs=8,
+        entropy_coef=0.008,
+        num_learning_epochs=6,
         num_mini_batches=8,
-        learning_rate=3.0e-4,
+        learning_rate=2.0e-4,
         schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
+        gamma=0.995,
+        lam=0.97,
         desired_kl=0.01,
         max_grad_norm=1.0,
     )

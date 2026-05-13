@@ -19,10 +19,26 @@ from typing import TYPE_CHECKING
 
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.sensors import FrameTransformer
+from isaaclab.utils.math import quat_apply, subtract_frame_transforms
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+
+def _get_tray_ends(
+    env: ManagerBasedRLEnv,
+    tray_cfg: SceneEntityCfg,
+    half_length: float = 0.22,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    tray: RigidObject = env.scene[tray_cfg.name]
+    tray_pos = tray.data.root_pos_w
+    tray_quat = tray.data.root_quat_w
+
+    local_y = torch.zeros(tray_pos.shape[0], 3, device=tray_pos.device)
+    local_y[:, 1] = 1.0
+    world_y = quat_apply(tray_quat, local_y)
+    return tray_pos + half_length * world_y, tray_pos - half_length * world_y
 
 
 def tray_position_in_robot_root_frame(
@@ -55,3 +71,27 @@ def tray_roll_pitch(
     sinp = torch.clamp(sinp, -1.0, 1.0)
     pitch = torch.asin(sinp)
     return torch.stack([roll, pitch], dim=1)
+
+
+def ee_to_tray_end_vector_in_robot_root_frame(
+    env: ManagerBasedRLEnv,
+    ee_frame_cfg: SceneEntityCfg,
+    side: str,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_length: float = 0.22,
+) -> torch.Tensor:
+    robot: RigidObject = env.scene[robot_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+
+    ee_pos_w = ee_frame.data.target_pos_w[..., 0, :]
+    left_end, right_end = _get_tray_ends(env, tray_cfg, half_length)
+    target_pos_w = left_end if side == "left" else right_end
+
+    ee_pos_b, _ = subtract_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, ee_pos_w
+    )
+    target_pos_b, _ = subtract_frame_transforms(
+        robot.data.root_pos_w, robot.data.root_quat_w, target_pos_w
+    )
+    return target_pos_b - ee_pos_b

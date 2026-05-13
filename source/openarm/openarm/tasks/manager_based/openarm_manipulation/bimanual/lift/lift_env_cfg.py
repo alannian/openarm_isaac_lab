@@ -157,6 +157,24 @@ class ObservationsCfg:
         # 托盘状态
         tray_position = ObsTerm(func=mdp.tray_position_in_robot_root_frame)
         tray_tilt = ObsTerm(func=mdp.tray_roll_pitch)
+        left_grasp_vector = ObsTerm(
+            func=mdp.ee_to_tray_end_vector_in_robot_root_frame,
+            params={
+                "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
+                "side": "left",
+                "half_length": 0.22,
+            },
+            noise=Unoise(n_min=-0.01, n_max=0.01),
+        )
+        right_grasp_vector = ObsTerm(
+            func=mdp.ee_to_tray_end_vector_in_robot_root_frame,
+            params={
+                "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
+                "side": "right",
+                "half_length": 0.22,
+            },
+            noise=Unoise(n_min=-0.01, n_max=0.01),
+        )
         # 上一步动作
         left_actions = ObsTerm(
             func=mdp.last_action, params={"action_name": "left_arm_action"}
@@ -213,8 +231,9 @@ class EventCfg:
 ##
 
 # 公共参数：抓握判定用
-_GRASP_DIST = 0.08   # EE 距离托盘端点多近算"抓住"（稍宽松，避免门控太严苛）
+_GRASP_DIST = 0.10   # 放宽抓握判定半径，避免策略卡在“接近但不触发抓取”
 _HALF_LEN   = 0.22   # 托盘抓握点偏移量（托盘半长 0.30m，抓握点向内 8cm）
+_TRAY_BASE_HEIGHT = 0.375
 _LEFT_FINGER_CFG  = SceneEntityCfg("robot", joint_names=["openarm_left_finger_joint.*"])
 _RIGHT_FINGER_CFG = SceneEntityCfg("robot", joint_names=["openarm_right_finger_joint.*"])
 
@@ -222,11 +241,11 @@ _RIGHT_FINGER_CFG = SceneEntityCfg("robot", joint_names=["openarm_right_finger_j
 class RewardsCfg:
     """奖励项配置：两阶段课程学习设计。
 
-    阶段A（0 ~ ~1200 iter）：
+    阶段A（0 ~ ~900 iter）：
         - 举升相关奖励权重初始为 0，策略专注学会双臂靠近 + 夹爪夹住
         - 接近奖励权重大幅提升，确保探索效率
 
-    阶段B（~1200 iter 起，由课程自动线性激活）：
+    阶段B（~900 iter 起，由课程自动线性激活）：
         - 举升奖励通过 tray_is_lifted_grasped 和 tray_goal_height_tracking_grasped
           施加门控：必须双手夹住托盘才能获得举升奖励，彻底堵死"推托盘"捷径
         - 课程学习在 60000 步内将举升奖励从 0 线性增长到目标权重
@@ -319,6 +338,7 @@ class RewardsCfg:
         params={
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
             "side": "left",
+            "distance_std": 0.12,
             "half_length": _HALF_LEN,
         },
     )
@@ -328,6 +348,7 @@ class RewardsCfg:
         params={
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
             "side": "right",
+            "distance_std": 0.12,
             "half_length": _HALF_LEN,
         },
     )
@@ -345,6 +366,7 @@ class RewardsCfg:
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
             "left_finger_cfg": _LEFT_FINGER_CFG,
             "right_finger_cfg": _RIGHT_FINGER_CFG,
+            "base_height": _TRAY_BASE_HEIGHT,
             "half_length": _HALF_LEN,
         },
     )
@@ -360,6 +382,7 @@ class RewardsCfg:
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
             "left_finger_cfg": _LEFT_FINGER_CFG,
             "right_finger_cfg": _RIGHT_FINGER_CFG,
+            "base_height": _TRAY_BASE_HEIGHT,
             "half_length": _HALF_LEN,
         },
     )
@@ -375,6 +398,7 @@ class RewardsCfg:
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
             "left_finger_cfg": _LEFT_FINGER_CFG,
             "right_finger_cfg": _RIGHT_FINGER_CFG,
+            "base_height": _TRAY_BASE_HEIGHT,
             "half_length": _HALF_LEN,
         },
     )
@@ -395,12 +419,14 @@ class RewardsCfg:
     )
     hand_distance = RewTerm(
         func=mdp.hand_distance_reward,
-        weight=0.5,
+        weight=0.3,
         params={
             "target_distance": 0.44,  # 2 × half_length = 2 × 0.22
             "std": 0.2,
             "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "distance_threshold": _GRASP_DIST,
+            "half_length": _HALF_LEN,
         },
     )
 
@@ -450,7 +476,7 @@ class CurriculumCfg:
 
     阶段A → 阶段B 切换：
         - tray_lifted / tray_goal_height / tray_goal_height_fine 从 0 线性增长
-        - 增长在 60000 步（约 1200 iter × 48 steps）内完成
+        - 增长在 60000 步（约 940 iter × 64 steps）内完成
         - 同期 grasp_symmetry / tray_tilt 也从 0 激活，确保举升质量
 
     平滑性惩罚：在 20000 步内从初始值增大，与之前保持一致。
@@ -500,7 +526,7 @@ class CurriculumCfg:
 class BimanualTrayLiftEnvCfg(ManagerBasedRLEnvCfg):
     """双臂托盘举升基类配置。"""
 
-    scene: TrayLiftSceneCfg = TrayLiftSceneCfg(num_envs=2048, env_spacing=3.0)
+    scene: TrayLiftSceneCfg = TrayLiftSceneCfg(num_envs=3072, env_spacing=3.0)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
