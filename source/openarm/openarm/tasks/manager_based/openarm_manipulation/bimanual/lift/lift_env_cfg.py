@@ -175,6 +175,14 @@ class ObservationsCfg:
             },
             noise=Unoise(n_min=-0.01, n_max=0.01),
         )
+        left_hand_grasp_pose = ObsTerm(
+            func=mdp.hand_grasp_pose_metrics,
+            params={"hand_cfg": SceneEntityCfg("robot", body_names=["openarm_left_hand"] )},
+        )
+        right_hand_grasp_pose = ObsTerm(
+            func=mdp.hand_grasp_pose_metrics,
+            params={"hand_cfg": SceneEntityCfg("robot", body_names=["openarm_right_hand"] )},
+        )
         # 上一步动作
         left_actions = ObsTerm(
             func=mdp.last_action, params={"action_name": "left_arm_action"}
@@ -234,6 +242,8 @@ class EventCfg:
 _GRASP_DIST = 0.10   # 放宽抓握判定半径，避免策略卡在“接近但不触发抓取”
 _HALF_LEN   = 0.22   # 托盘抓握点偏移量（托盘半长 0.30m，抓握点向内 8cm）
 _TRAY_BASE_HEIGHT = 0.375
+_LEFT_HAND_BODY = SceneEntityCfg("robot", body_names=["openarm_left_hand"])
+_RIGHT_HAND_BODY = SceneEntityCfg("robot", body_names=["openarm_right_hand"])
 _LEFT_FINGER_CFG  = SceneEntityCfg("robot", joint_names=["openarm_left_finger_joint.*"])
 _RIGHT_FINGER_CFG = SceneEntityCfg("robot", joint_names=["openarm_right_finger_joint.*"])
 
@@ -312,6 +322,7 @@ class RewardsCfg:
         params={
             "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
+            "hand_cfg": _LEFT_HAND_BODY,
             "finger_cfg": _LEFT_FINGER_CFG,
             "side": "left",
             "half_length": _HALF_LEN,
@@ -323,6 +334,7 @@ class RewardsCfg:
         params={
             "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
+            "hand_cfg": _RIGHT_HAND_BODY,
             "finger_cfg": _RIGHT_FINGER_CFG,
             "side": "right",
             "half_length": _HALF_LEN,
@@ -333,22 +345,24 @@ class RewardsCfg:
     # 计算 EE 到目标点的位移向量，Z 分量越小 → 接近方向越水平 → 奖励越高
     # 不依赖 EE 轴约定，避免之前因轴方向猜测错误导致的怪异姿态
     left_grasp_orientation = RewTerm(
-        func=mdp.ee_approach_direction_reward,
-        weight=3.0,   # 从 2.0 提升到 3.0：接近方向是确保托盘在手指之间的第二关键约束
+        func=mdp.gripper_grasp_pose_reward,
+        weight=5.0,   # 手爪闭合轴必须对准托盘法向，否则策略会学成侧卡/侧顶
         params={
+            "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
+            "hand_cfg": _LEFT_HAND_BODY,
             "side": "left",
-            "distance_std": 0.12,
             "half_length": _HALF_LEN,
         },
     )
     right_grasp_orientation = RewTerm(
-        func=mdp.ee_approach_direction_reward,
-        weight=3.0,
+        func=mdp.gripper_grasp_pose_reward,
+        weight=5.0,
         params={
+            "distance_threshold": _GRASP_DIST,
             "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
+            "hand_cfg": _RIGHT_HAND_BODY,
             "side": "right",
-            "distance_std": 0.12,
             "half_length": _HALF_LEN,
         },
     )
@@ -364,6 +378,8 @@ class RewardsCfg:
             "grasp_distance_threshold": _GRASP_DIST,
             "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "left_hand_cfg": _LEFT_HAND_BODY,
+            "right_hand_cfg": _RIGHT_HAND_BODY,
             "left_finger_cfg": _LEFT_FINGER_CFG,
             "right_finger_cfg": _RIGHT_FINGER_CFG,
             "base_height": _TRAY_BASE_HEIGHT,
@@ -380,6 +396,8 @@ class RewardsCfg:
             "grasp_distance_threshold": _GRASP_DIST,
             "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "left_hand_cfg": _LEFT_HAND_BODY,
+            "right_hand_cfg": _RIGHT_HAND_BODY,
             "left_finger_cfg": _LEFT_FINGER_CFG,
             "right_finger_cfg": _RIGHT_FINGER_CFG,
             "base_height": _TRAY_BASE_HEIGHT,
@@ -396,6 +414,8 @@ class RewardsCfg:
             "grasp_distance_threshold": _GRASP_DIST,
             "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "left_hand_cfg": _LEFT_HAND_BODY,
+            "right_hand_cfg": _RIGHT_HAND_BODY,
             "left_finger_cfg": _LEFT_FINGER_CFG,
             "right_finger_cfg": _RIGHT_FINGER_CFG,
             "base_height": _TRAY_BASE_HEIGHT,

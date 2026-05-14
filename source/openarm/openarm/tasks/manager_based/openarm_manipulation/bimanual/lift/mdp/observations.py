@@ -41,6 +41,20 @@ def _get_tray_ends(
     return tray_pos + half_length * world_y, tray_pos - half_length * world_y
 
 
+def _tray_axes_world(tray_quat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    local_x = torch.zeros(tray_quat.shape[0], 3, device=tray_quat.device)
+    local_z = torch.zeros(tray_quat.shape[0], 3, device=tray_quat.device)
+    local_x[:, 0] = 1.0
+    local_z[:, 2] = 1.0
+    return quat_apply(tray_quat, local_x), quat_apply(tray_quat, local_z)
+
+
+def _body_axis_world(body_quat: torch.Tensor, axis_index: int) -> torch.Tensor:
+    axis = torch.zeros(body_quat.shape[0], 3, device=body_quat.device)
+    axis[:, axis_index] = 1.0
+    return quat_apply(body_quat, axis)
+
+
 def tray_position_in_robot_root_frame(
     env: ManagerBasedRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -95,3 +109,21 @@ def ee_to_tray_end_vector_in_robot_root_frame(
         robot.data.root_pos_w, robot.data.root_quat_w, target_pos_w
     )
     return target_pos_b - ee_pos_b
+
+
+def hand_grasp_pose_metrics(
+    env: ManagerBasedRLEnv,
+    hand_cfg: SceneEntityCfg,
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+) -> torch.Tensor:
+    robot: RigidObject = env.scene[hand_cfg.name]
+    tray: RigidObject = env.scene[tray_cfg.name]
+
+    hand_quat = robot.data.body_quat_w[:, hand_cfg.body_ids[0]]
+    tray_x_world, tray_z_world = _tray_axes_world(tray.data.root_quat_w)
+    hand_close_world = _body_axis_world(hand_quat, axis_index=1)
+    hand_forward_world = _body_axis_world(hand_quat, axis_index=2)
+
+    close_align = torch.abs((hand_close_world * tray_z_world).sum(dim=1))
+    forward_align = torch.abs((hand_forward_world * tray_x_world).sum(dim=1))
+    return torch.stack([close_align, forward_align], dim=1)
