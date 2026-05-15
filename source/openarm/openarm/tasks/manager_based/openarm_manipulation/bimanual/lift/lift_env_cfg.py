@@ -177,11 +177,17 @@ class ObservationsCfg:
         )
         left_hand_grasp_pose = ObsTerm(
             func=mdp.hand_grasp_pose_metrics,
-            params={"hand_cfg": SceneEntityCfg("robot", body_names=["openarm_left_hand"] )},
+            params={
+                "hand_cfg": SceneEntityCfg("robot", body_names=["openarm_left_hand"]),
+                "side": "left",
+            },
         )
         right_hand_grasp_pose = ObsTerm(
             func=mdp.hand_grasp_pose_metrics,
-            params={"hand_cfg": SceneEntityCfg("robot", body_names=["openarm_right_hand"] )},
+            params={
+                "hand_cfg": SceneEntityCfg("robot", body_names=["openarm_right_hand"]),
+                "side": "right",
+            },
         )
         # 上一步动作
         left_actions = ObsTerm(
@@ -313,6 +319,8 @@ class RewardsCfg:
             "distance_threshold": _GRASP_DIST,
             "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
             "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
+            "left_hand_cfg": _LEFT_HAND_BODY,
+            "right_hand_cfg": _RIGHT_HAND_BODY,
             "half_length": _HALF_LEN,
         },
     )

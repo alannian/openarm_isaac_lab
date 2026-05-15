@@ -54,12 +54,18 @@ def _get_tray_ends(
     return left_end, right_end
 
 
-def _tray_axes_world(tray_quat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _tray_axes_world(tray_quat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     local_x = torch.zeros(tray_quat.shape[0], 3, device=tray_quat.device)
+    local_y = torch.zeros(tray_quat.shape[0], 3, device=tray_quat.device)
     local_z = torch.zeros(tray_quat.shape[0], 3, device=tray_quat.device)
     local_x[:, 0] = 1.0
+    local_y[:, 1] = 1.0
     local_z[:, 2] = 1.0
-    return quat_apply(tray_quat, local_x), quat_apply(tray_quat, local_z)
+    return (
+        quat_apply(tray_quat, local_x),
+        quat_apply(tray_quat, local_y),
+        quat_apply(tray_quat, local_z),
+    )
 
 
 def _body_axis_world(body_quat: torch.Tensor, axis_index: int) -> torch.Tensor:
@@ -83,19 +89,23 @@ def _finger_grip_signal(
 def _gripper_pose_signal(
     env: ManagerBasedRLEnv,
     hand_cfg: SceneEntityCfg,
+    side: str,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
 ) -> torch.Tensor:
     robot: RigidObject = env.scene[hand_cfg.name]
     tray: RigidObject = env.scene[tray_cfg.name]
 
     hand_quat = robot.data.body_quat_w[:, hand_cfg.body_ids[0]]
-    tray_x_world, tray_z_world = _tray_axes_world(tray.data.root_quat_w)
+    tray_x_world, tray_y_world, tray_z_world = _tray_axes_world(tray.data.root_quat_w)
+    forward_target = -tray_y_world if side == "left" else tray_y_world
+    hand_span_world = _body_axis_world(hand_quat, axis_index=0)
     hand_close_world = _body_axis_world(hand_quat, axis_index=1)
     hand_forward_world = _body_axis_world(hand_quat, axis_index=2)
 
     close_align = torch.abs((hand_close_world * tray_z_world).sum(dim=1))
-    forward_align = torch.abs((hand_forward_world * tray_x_world).sum(dim=1))
-    return close_align * forward_align
+    forward_align = torch.clamp((hand_forward_world * forward_target).sum(dim=1), min=0.0)
+    lateral_align = torch.abs((hand_span_world * tray_x_world).sum(dim=1))
+    return close_align * forward_align * lateral_align
 
 
 def _bimanual_grasp_signal(
@@ -127,8 +137,8 @@ def _bimanual_grasp_signal(
 
     left_contact = _proximity_signal(left_dist, grasp_distance_threshold)
     right_contact = _proximity_signal(right_dist, grasp_distance_threshold)
-    left_pose = _gripper_pose_signal(env, left_hand_cfg, tray_cfg=tray_cfg)
-    right_pose = _gripper_pose_signal(env, right_hand_cfg, tray_cfg=tray_cfg)
+    left_pose = _gripper_pose_signal(env, left_hand_cfg, side="left", tray_cfg=tray_cfg)
+    right_pose = _gripper_pose_signal(env, right_hand_cfg, side="right", tray_cfg=tray_cfg)
     left_grip = _finger_grip_signal(left_finger, std=grip_std)
     right_grip = _finger_grip_signal(right_finger, std=grip_std)
     return left_contact * left_pose * left_grip * right_contact * right_pose * right_grip
@@ -170,10 +180,12 @@ def grasp_both_ends(
     distance_threshold: float,
     left_ee_cfg: SceneEntityCfg,
     right_ee_cfg: SceneEntityCfg,
+    left_hand_cfg: SceneEntityCfg,
+    right_hand_cfg: SceneEntityCfg,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
     half_length: float = 0.30,
 ) -> torch.Tensor:
-    """连续奖励：左右手越同时接近各自端点，奖励越高。"""
+    """连续奖励：左右手越同时以正确姿态接近各自端点，奖励越高。"""
     left_ee: FrameTransformer = env.scene[left_ee_cfg.name]
     right_ee: FrameTransformer = env.scene[right_ee_cfg.name]
     left_pos  = left_ee.data.target_pos_w[..., 0, :]
@@ -183,8 +195,13 @@ def grasp_both_ends(
 
     left_dist = torch.norm(left_pos - left_end, dim=1)
     right_dist = torch.norm(right_pos - right_end, dim=1)
-    return _proximity_signal(left_dist, distance_threshold) * _proximity_signal(
-        right_dist, distance_threshold
+    left_pose = _gripper_pose_signal(env, left_hand_cfg, side="left", tray_cfg=tray_cfg)
+    right_pose = _gripper_pose_signal(env, right_hand_cfg, side="right", tray_cfg=tray_cfg)
+    return (
+        _proximity_signal(left_dist, distance_threshold)
+        * left_pose
+        * _proximity_signal(right_dist, distance_threshold)
+        * right_pose
     )
 
 
@@ -221,7 +238,7 @@ def finger_closure_reward(
     robot = env.scene[finger_cfg.name]
     finger_pos = robot.data.joint_pos[:, finger_cfg.joint_ids].mean(dim=1)
     grip_signal = _finger_grip_signal(finger_pos, std=0.006)
-    pose_signal = _gripper_pose_signal(env, hand_cfg, tray_cfg=tray_cfg)
+    pose_signal = _gripper_pose_signal(env, hand_cfg, side=side, tray_cfg=tray_cfg)
 
     # 越靠近 + 越精确夹住托盘，奖励越高
     return approach * pose_signal * grip_signal
@@ -243,7 +260,7 @@ def gripper_grasp_pose_reward(
 
     dist = torch.norm(ee_pos - target, dim=1)
     proximity = _proximity_signal(dist, distance_threshold)
-    pose_signal = _gripper_pose_signal(env, hand_cfg, tray_cfg=tray_cfg)
+    pose_signal = _gripper_pose_signal(env, hand_cfg, side=side, tray_cfg=tray_cfg)
     return proximity * pose_signal
 
 
