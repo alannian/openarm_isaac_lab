@@ -60,21 +60,22 @@ class OpenArmTrayLiftEnvCfg(BimanualTrayLiftEnvCfg):
         # 初始关节略弯，让两 EE 自然落到托盘端附近正上方，缩短 reach 阶段。
         # 双臂使用同一组角度（OpenArm 双臂沿 Y 镜像对称安装时，相同关节角会自然
         # 把双手摆成镜像姿态；若用户机器人不是这样，可在此处把右臂部分关节取负）。
-        # 注：OpenArm USD 中各关节硬限位（来自 articulation 校验报错）：
-        #   joint2 ∈ [-3.316, 0.175]  → 负方向才是抬肩朝前
-        #   joint4 ∈ [ 0.000, 2.443]  → 只能正向屈肘
-        #   joint6 ∈ [-0.785, 0.785]  → 腕翻范围仅 ±45°
-        # 故符号/数值需控制在限位内。
+        # 注：OpenArm USD 各关节硬限位（来自 articulation 校验报错），左右臂部分镜像：
+        #   left_joint2  ∈ [-3.316,  0.175]  → 抬肩朝前为负向
+        #   right_joint2 ∈ [-0.175,  3.316]  → 抬肩朝前为正向（镜像）
+        #   joint4       ∈ [ 0.000,  2.443]  → 左右一致，只能正向屈肘
+        #   joint6       ∈ [-0.785,  0.785]  → 左右一致，腕翻 ±45°
+        # 故 joint2 左右取相反符号，joint4/joint6 左右同号即可形成镜像姿态。
         ready_joint_pos = {
             "openarm_left_joint1": 0.0,
-            "openarm_left_joint2": -0.40,   # 抬肩朝前（负向）
+            "openarm_left_joint2": -0.40,   # 抬肩朝前（左臂负向）
             "openarm_left_joint3": 0.0,
             "openarm_left_joint4": 1.20,    # 肘 ~70°（正向屈肘）
             "openarm_left_joint5": 0.0,
             "openarm_left_joint6": 0.60,    # 腕朝下（限位内）
             "openarm_left_joint7": 0.0,
             "openarm_right_joint1": 0.0,
-            "openarm_right_joint2": -0.40,
+            "openarm_right_joint2": 0.40,   # 抬肩朝前（右臂正向，镜像）
             "openarm_right_joint3": 0.0,
             "openarm_right_joint4": 1.20,
             "openarm_right_joint5": 0.0,
