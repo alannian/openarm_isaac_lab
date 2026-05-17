@@ -40,7 +40,9 @@ class OpenArmTrayLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     resume = False
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
+        # 注：二值夹爪两维 raw action 对环境无梯度，过大的初始 std + 高 entropy bonus
+        # 会让其幅值无界漂移；下面采用更保守的 init_noise_std / entropy_coef 抑制之。
+        init_noise_std=0.5,
         actor_hidden_dims=[256, 256, 128],
         critic_hidden_dims=[256, 256, 128],
         activation="elu",
@@ -49,7 +51,7 @@ class OpenArmTrayLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.005,
         num_learning_epochs=8,
         num_mini_batches=8,
         learning_rate=3.0e-4,

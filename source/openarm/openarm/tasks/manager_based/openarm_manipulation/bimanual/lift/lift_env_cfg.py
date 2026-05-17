@@ -236,10 +236,12 @@ class ObservationsCfg:
         )
 
         # ── 历史动作 ──────────────────────────────────────────────
+        # 注意：仅观测两臂的 raw last_action。二值夹爪 (BinaryJointPositionActionCfg)
+        # 的 raw action 仅 sign 有意义、幅值对环境没有梯度，若放入观测会无界漂移
+        # 并把 NN 输入推到极端值，最终引爆 critic（value_loss → inf）。
+        # 夹爪状态已由 left_finger_pos / right_finger_pos 充分表达。
         left_actions = ObsTerm(func=mdp.last_action, params={"action_name": "left_arm_action"})
         right_actions = ObsTerm(func=mdp.last_action, params={"action_name": "right_arm_action"})
-        left_grip_action = ObsTerm(func=mdp.last_action, params={"action_name": "left_gripper_action"})
-        right_grip_action = ObsTerm(func=mdp.last_action, params={"action_name": "right_gripper_action"})
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -466,7 +468,12 @@ class RewardsCfg:
     )
 
     # ── A6. 控制平滑性 ────────────────────────────────────────
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
+    # 用 arm-only 版本：跳过二值夹爪两维，避免其无界幅值漂移污染该 L2 惩罚。
+    action_rate = RewTerm(
+        func=mdp.action_rate_l2_arm_only,
+        weight=-1e-4,
+        params={"arm_action_names": ("left_arm_action", "right_arm_action")},
+    )
     left_joint_vel = RewTerm(
         func=mdp.joint_vel_l2,
         weight=-5e-4,

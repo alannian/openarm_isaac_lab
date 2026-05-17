@@ -385,3 +385,33 @@ def hand_spacing(
     d = torch.norm(left_pos - right_pos, dim=1)
     err = (d - target_distance).abs()
     return 1.0 - torch.tanh(err / std)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# H. 选择性 action-rate（只惩罚双臂关节维度，跳过二值夹爪）
+# ─────────────────────────────────────────────────────────────────────
+
+def action_rate_l2_arm_only(
+    env: ManagerBasedRLEnv,
+    arm_action_names: tuple[str, ...] = ("left_arm_action", "right_arm_action"),
+) -> torch.Tensor:
+    """对相邻两步 raw action 的 L2 变化做平滑性惩罚，但仅覆盖给定的若干臂关节动作项，
+    跳过 ``BinaryJointPositionAction`` 等"sign-only"动作 —— 后者的幅值对环境没有梯度，
+    若纳入该惩罚会导致幅值无界漂移并把 critic 训飞（value_loss → inf）。
+
+    实现方式：在拼接后的 ``action_manager.action`` 上取这些臂动作项对应的切片。
+    """
+    am = env.action_manager
+    selected = set(arm_action_names)
+    indices: list[int] = []
+    cursor = 0
+    for name in am.active_terms:
+        dim = am.get_term(name).action_dim
+        if name in selected:
+            indices.extend(range(cursor, cursor + dim))
+        cursor += dim
+    if not indices:
+        return torch.zeros(env.num_envs, device=env.device)
+    idx = torch.as_tensor(indices, device=am.action.device, dtype=torch.long)
+    diff = am.action.index_select(1, idx) - am.prev_action.index_select(1, idx)
+    return torch.sum(torch.square(diff), dim=1)
