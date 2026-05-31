@@ -25,12 +25,15 @@ from isaaclab.utils import configclass
 class OpenArmTrayLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """PPO 设置：
 
-    - 双臂任务动作维数 ~16，观测维数 ~70，需要稍深的网络。
+    - 双臂任务动作维数 16（7+7+1+1），观测维数 ~75，用稍深的网络。
     - 8 s 任务长度 + decimation=2 + dt=0.01 → episode ≈ 400 policy steps。
       num_steps_per_env=64 让一次 rollout 跨越约 1/6 episode，配合 4096 env
       给 ~262k 样本/iter，足够稳定的优势估计。
-    - 初始 init_noise_std=1.0 提供充足探索；adaptive schedule 自动收紧。
-    - entropy_coef=0.01 略高，鼓励双臂之间的探索协同。
+    - **num_steps_per_env=64 与课程的 num_steps 直接挂钩**：课程里
+      ``num_steps=8000`` ≈ 8000/64 ≈ 125 次迭代，即策略先用约前 125 iter 学会
+      "抓 + 抬"，之后才把 平稳/对称/平滑 的权重调大。
+    - init_noise_std=0.5：二值夹爪两维 raw action 对环境无梯度，过大的初始 std +
+      高 entropy 会让其幅值无界漂移；这里用更保守值抑制之。
     """
     num_steps_per_env = 64
     max_iterations = 5000

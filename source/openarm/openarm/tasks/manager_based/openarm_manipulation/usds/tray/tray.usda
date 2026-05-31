@@ -1,0 +1,65 @@
+#usda 1.0
+(
+    defaultPrim = "Tray"
+    metersPerUnit = 1.0
+    upAxis = "Z"
+    doc = "Bimanual lift tray: a flat deck with two raised grasp handles (one rigid body)."
+)
+
+# ─────────────────────────────────────────────────────────────────────
+# Tray = ONE rigid body composed of three boxes (tray-local frame,
+# origin at the deck centre; long axis along +Y; handles run along X):
+#
+#   deck         : full 0.30 (X) × 0.50 (Y) × 0.025 (Z)  → half (0.15, 0.25, 0.0125)
+#   handle_left  : full 0.12 (X) × 0.024 (Y) × 0.045 (Z) at (0, +0.22, +0.035)
+#   handle_right : full 0.12 (X) × 0.024 (Y) × 0.045 (Z) at (0, -0.22, +0.035)
+#
+# Each Cube is `size = 2` (spans [-1, 1]) so xformOp:scale == box half-extents.
+# Handles sit on the deck top (deck top z = +0.0125 == handle bottom) and rise
+# to z = +0.0575; their thin 24 mm Y-thickness drops straight into the 88 mm
+# parallel-jaw gripper for a stable top-down grasp.  Geometry constants here
+# MUST match HALF_GRASP_Y / GRASP_Z_OFFSET / DECK_* in lift_env_cfg.py.
+# ─────────────────────────────────────────────────────────────────────
+
+def Xform "Tray" (
+    prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+)
+{
+    float physics:mass = 0.6
+
+    def Cube "deck" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+        double size = 2
+        color3f[] primvars:displayColor = [(0.82, 0.66, 0.36)]
+        double3 xformOp:translate = (0, 0, 0)
+        float3 xformOp:scale = (0.15, 0.25, 0.0125)
+        uniform token[] xformOp:opOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "handle_left" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+        double size = 2
+        color3f[] primvars:displayColor = [(0.20, 0.20, 0.23)]
+        double3 xformOp:translate = (0, 0.22, 0.035)
+        float3 xformOp:scale = (0.06, 0.012, 0.0225)
+        uniform token[] xformOp:opOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "handle_right" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+        double size = 2
+        color3f[] primvars:displayColor = [(0.20, 0.20, 0.23)]
+        double3 xformOp:translate = (0, -0.22, 0.035)
+        float3 xformOp:scale = (0.06, 0.012, 0.0225)
+        uniform token[] xformOp:opOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+}

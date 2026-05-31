@@ -26,13 +26,14 @@ if TYPE_CHECKING:
 
 def tray_dropped(
     env: ManagerBasedRLEnv,
-    minimum_height: float = 0.20,
+    minimum_height: float = 0.12,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
 ) -> torch.Tensor:
-    """托盘坠落到 minimum_height 以下时终止 episode。
+    """托盘质心掉到 minimum_height 以下时终止 episode（视为失败）。
 
-    新几何：tray 初始置于 stand 顶面（≈ z = 0.245）。坠落到 0.20 以下意味着
-    它已离开支架并显著下落，提早终止以避免 episode 浪费在地上反弹。
+    新几何：托盘静置于中央支架顶面，质心 ≈ 0.2125 m。掉到 0.12 以下意味着它已
+    被碰离支架并显著下落，提前终止以免 episode 浪费在地面反弹上。注意阈值要明显
+    低于静置高度，避免早期探索的轻微下沉触发误终止、扼杀学习。
     """
     tray: RigidObject = env.scene[tray_cfg.name]
     return tray.data.root_pos_w[:, 2] < minimum_height

@@ -70,13 +70,16 @@ def main():
             tray_pos = scene["tray"].data.root_pos_w[0]
             tray_quat = scene["tray"].data.root_quat_w[0]
 
-            # 抓取目标点（root frame 原点假设在 (0,0,0)，世界系下即 tray ± half_length 上 0.02）
+            # 把手抓取点：tray_pos + R * (0, ±0.22, +0.035)（与 rewards/observations 一致）
             from isaaclab.utils.math import quat_apply
+            half_grasp_y = 0.22
+            grasp_z_offset = 0.035
+            left_local = torch.tensor([0.0, half_grasp_y, grasp_z_offset], device=tray_pos.device)
+            right_local = torch.tensor([0.0, -half_grasp_y, grasp_z_offset], device=tray_pos.device)
             local_y = torch.tensor([0.0, 1.0, 0.0], device=tray_pos.device)
             tray_long = quat_apply(tray_quat.unsqueeze(0), local_y.unsqueeze(0))[0]
-            half_len = 0.25
-            left_tgt = tray_pos + half_len * tray_long + torch.tensor([0, 0, 0.02], device=tray_pos.device)
-            right_tgt = tray_pos - half_len * tray_long + torch.tensor([0, 0, 0.02], device=tray_pos.device)
+            left_tgt = tray_pos + quat_apply(tray_quat.unsqueeze(0), left_local.unsqueeze(0))[0]
+            right_tgt = tray_pos + quat_apply(tray_quat.unsqueeze(0), right_local.unsqueeze(0))[0]
 
             # 手部三轴
             robot = scene["robot"]

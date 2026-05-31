@@ -12,35 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""双臂托盘举升任务的顶层配置（从头重新设计）。
+"""双臂托盘举升任务顶层配置（彻底重构版）。
 
-任务定义：
-    两个 7 自由度 OpenArm 机械臂从上方分别抓住一根长杆形托盘的两端，
-    将其平稳举起到目标高度并保持水平。
+任务：两个 7-DoF OpenArm 机械臂从上方分别抓住一块"托盘"两端的把手，协同将其
+从中央支架上平稳举起到目标高度并保持水平。
 
-几何约定（全部以 robot root 系描述，root 在两臂中线、地面处）：
-    - 托盘 (tray):     bar 形, size = (0.04, 0.50, 0.025) m, mass = 0.4 kg
-                       长轴沿 +Y, 初始 pos = (0.40, 0.0, 0.245)
-    - 支架 (stand):    短粗立柱, size = (0.08, 0.08, 0.22) m
-                       置于 (0.40, 0.0, 0.11)，仅在托盘中部下方
-                       → 两端 ±0.25 m 处腾空，方便从上方抓取
-    - target_height:   0.55 m  （比初始高 0.30 m）
-    - grasp 半径:      0.08 m
-    - half_length:     0.25 m
+几何约定（机器人 root 系；机器人朝 +X，左臂在 +Y、右臂在 -Y）：
+    - 托盘 (tray):  扁平板 0.30(X)×0.50(Y)×0.025(Z) + 两端把手横杆，单刚体，
+                    见 ``usds/tray/tray.usda``。把手抓取点在托盘局部
+                    (0, ±0.22, +0.035)。初始置于中央支架上。
+    - 支架 (stand): 中央细立柱 0.10×0.12×0.20，仅托住托盘中部，两端把手腾空可抓。
+    - 静置高度 TRAY_BASE_HEIGHT = 0.2125（支架顶 0.20 + 板半厚 0.0125）
+    - 目标高度 TARGET_HEIGHT    = 0.46（≈ 抬升 25 cm）
 
-整体奖励权重（加性）：
-    reach (coarse / fine) ........ 2.0 / 1.0  × 2 sides = 6.0
-    ee_above_tray (penalty) ...... -2.0       × 2 sides = -4.0
-    hand_pointing_down ........... 1.5        × 2 sides = 3.0
-    gripper_yaw_align ............ 1.0        × 2 sides = 2.0
-    gripper_close_when_near ...... 4.0        × 2 sides = 8.0
-    hand_spacing ................. 0.5
-    lift_progress (curriculum) ... 0 → 8.0
-    goal_height_tracking (curr.).. 0 → 10.0
-    tray_tilt_when_lifted ........ -2.0
-    tray_ang_speed_when_lifted ... -0.05
-    action_rate .................. -1e-3
-    joint_vel .................... -5e-4
+奖励哲学（修复旧版"练不出来"的根因，详见 mdp/rewards.py）：
+    - 接近、举升、目标高度等主信号**全程激活、绝不门控**；
+    - 去掉"必须在托盘上方"的反向惩罚；
+    - 平稳/对称/平滑等约束初始权重很小，靠课程在学会"抓+抬"之后再调大。
 """
 
 from dataclasses import MISSING
@@ -65,20 +53,24 @@ from . import mdp
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 常量（与 mdp 内部默认值保持一致）
+# 几何常量（必须与 usds/tray/tray.usda 与 config/joint_pos_env_cfg.py 一致）
 # ─────────────────────────────────────────────────────────────────────
-HALF_LENGTH = 0.25           # 托盘半长 (m)；与托盘 size_y=0.50 一致
-GRASP_Z_OFFSET = 0.02        # 抓取点距托盘中心向上的 offset (m)
-GRASP_RADIUS = 0.08          # 进入抓取的 TCP 半径 (m)
-TRAY_BASE_HEIGHT = 0.2325    # 托盘初始 z（stand top 0.22 + 半厚 0.0125）
-LIFT_THRESHOLD = 0.30        # 视为"已举起"的高度
-TARGET_HEIGHT = 0.55         # 最终目标高度（比初始高 ~0.32 m）
-HAND_SPACING_TARGET = 0.50   # 双手期望间距 = 2 × HALF_LENGTH
+HALF_GRASP_Y = 0.22          # 把手抓取点距托盘中心的 |Y| (m)
+GRASP_Z_OFFSET = 0.035       # 把手抓取点相对托盘中心的高度 (m)
+GRASP_RADIUS = 0.08          # 抓握辅助/加分项的 TCP 半径 (m)
+
+STAND_TOP = 0.20             # 支架顶面高度 (m)
+DECK_HALF_THICKNESS = 0.0125 # 托盘板半厚 (m)
+TRAY_BASE_HEIGHT = STAND_TOP + DECK_HALF_THICKNESS  # 0.2125：托盘静置质心高度
+MINIMAL_LIFT_HEIGHT = TRAY_BASE_HEIGHT + 0.04       # 0.2525：视为"已离台"
+TARGET_HEIGHT = 0.46         # 目标举升高度（≈ +25 cm）
 
 _LEFT_HAND_BODY = SceneEntityCfg("robot", body_names=["openarm_left_hand"])
 _RIGHT_HAND_BODY = SceneEntityCfg("robot", body_names=["openarm_right_hand"])
 _LEFT_FINGER_CFG = SceneEntityCfg("robot", joint_names=["openarm_left_finger_joint.*"])
 _RIGHT_FINGER_CFG = SceneEntityCfg("robot", joint_names=["openarm_right_finger_joint.*"])
+_LEFT_EE = SceneEntityCfg("left_ee_frame")
+_RIGHT_EE = SceneEntityCfg("right_ee_frame")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -87,21 +79,20 @@ _RIGHT_FINGER_CFG = SceneEntityCfg("robot", joint_names=["openarm_right_finger_j
 
 @configclass
 class TrayLiftSceneCfg(InteractiveSceneCfg):
-    """场景：双臂机器人 + 细支架 + 长杆托盘。
+    """场景：双臂机器人 + 中央细支架 + 带把手的托盘（机器人/EE/托盘由子类填充）。"""
 
-    机器人 / 末端坐标系 / 托盘 由子类填充。
-    """
     robot: ArticulationCfg = MISSING
     left_ee_frame: FrameTransformerCfg = MISSING
     right_ee_frame: FrameTransformerCfg = MISSING
     tray: RigidObjectCfg = MISSING
 
-    # 中央细支架（窄于托盘，使两端 ±0.25 m 腾空可抓取）
+    # 中央支架：托住托盘中部 0.12×0.24 区域（使板静置稳定、不易侧翻），
+    # 两端把手 (±0.22 m) 仍在支架外侧腾空，可从上方无碰撞抓取。
     stand = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Stand",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.40, 0.0, 0.11]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.40, 0.0, STAND_TOP / 2.0]),
         spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.08, 0.22),
+            size=(0.12, 0.24, STAND_TOP),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.20, 0.20, 0.20), roughness=0.8
@@ -125,8 +116,7 @@ class TrayLiftSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class ActionsCfg:
-    """动作维度 = 7 + 7 + 1 + 1 = 16
-    （二值夹爪每边 1 维 sign(a)）。"""
+    """动作维度 = 7 + 7 + 1 + 1 = 16（二值夹爪每边 1 维 sign(a)）。"""
     left_arm_action: mdp.JointPositionActionCfg = MISSING
     right_arm_action: mdp.JointPositionActionCfg = MISSING
     left_gripper_action: mdp.BinaryJointPositionActionCfg = MISSING
@@ -141,7 +131,7 @@ class ActionsCfg:
 class ObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
-        """精简观测，聚焦"做这个任务必须看到的几何线索"。"""
+        """聚焦做这个任务必须看到的几何线索。"""
 
         # ── 本体感知 ───────────────────────────────────────────────
         left_joint_pos = ObsTerm(
@@ -186,27 +176,27 @@ class ObservationsCfg:
         # ── 抓取几何（root 系） ────────────────────────────────────
         left_ee_pos = ObsTerm(
             func=mdp.ee_position_in_robot_root_frame,
-            params={"ee_frame_cfg": SceneEntityCfg("left_ee_frame")},
+            params={"ee_frame_cfg": _LEFT_EE},
         )
         right_ee_pos = ObsTerm(
             func=mdp.ee_position_in_robot_root_frame,
-            params={"ee_frame_cfg": SceneEntityCfg("right_ee_frame")},
+            params={"ee_frame_cfg": _RIGHT_EE},
         )
-        left_to_target = ObsTerm(
-            func=mdp.ee_to_tray_end_vector_in_robot_root_frame,
+        left_to_handle = ObsTerm(
+            func=mdp.ee_to_handle_vector_in_robot_root_frame,
             params={
-                "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
+                "ee_frame_cfg": _LEFT_EE,
                 "side": "left",
-                "half_length": HALF_LENGTH,
+                "half_grasp_y": HALF_GRASP_Y,
                 "grasp_z_offset": GRASP_Z_OFFSET,
             },
         )
-        right_to_target = ObsTerm(
-            func=mdp.ee_to_tray_end_vector_in_robot_root_frame,
+        right_to_handle = ObsTerm(
+            func=mdp.ee_to_handle_vector_in_robot_root_frame,
             params={
-                "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
+                "ee_frame_cfg": _RIGHT_EE,
                 "side": "right",
-                "half_length": HALF_LENGTH,
+                "half_grasp_y": HALF_GRASP_Y,
                 "grasp_z_offset": GRASP_Z_OFFSET,
             },
         )
@@ -217,29 +207,13 @@ class ObservationsCfg:
         tray_lin_vel = ObsTerm(func=mdp.tray_linear_velocity)
         tray_ang_vel = ObsTerm(func=mdp.tray_angular_velocity)
 
-        # ── 手部姿态（朝向标量） ──────────────────────────────────
-        left_hand_down = ObsTerm(
-            func=mdp.hand_down_alignment,
-            params={"hand_cfg": _LEFT_HAND_BODY},
-        )
-        right_hand_down = ObsTerm(
-            func=mdp.hand_down_alignment,
-            params={"hand_cfg": _RIGHT_HAND_BODY},
-        )
-        left_hand_yaw = ObsTerm(
-            func=mdp.hand_yaw_alignment,
-            params={"hand_cfg": _LEFT_HAND_BODY},
-        )
-        right_hand_yaw = ObsTerm(
-            func=mdp.hand_yaw_alignment,
-            params={"hand_cfg": _RIGHT_HAND_BODY},
-        )
+        # ── 手部姿态（标量） ──────────────────────────────────────
+        left_hand_down = ObsTerm(func=mdp.hand_down_alignment, params={"hand_cfg": _LEFT_HAND_BODY})
+        right_hand_down = ObsTerm(func=mdp.hand_down_alignment, params={"hand_cfg": _RIGHT_HAND_BODY})
+        left_hand_span = ObsTerm(func=mdp.hand_span_alignment, params={"hand_cfg": _LEFT_HAND_BODY})
+        right_hand_span = ObsTerm(func=mdp.hand_span_alignment, params={"hand_cfg": _RIGHT_HAND_BODY})
 
-        # ── 历史动作 ──────────────────────────────────────────────
-        # 注意：仅观测两臂的 raw last_action。二值夹爪 (BinaryJointPositionActionCfg)
-        # 的 raw action 仅 sign 有意义、幅值对环境没有梯度，若放入观测会无界漂移
-        # 并把 NN 输入推到极端值，最终引爆 critic（value_loss → inf）。
-        # 夹爪状态已由 left_finger_pos / right_finger_pos 充分表达。
+        # ── 历史动作（仅两臂；二值夹爪 raw 幅值无界，不入观测） ────
         left_actions = ObsTerm(func=mdp.last_action, params={"action_name": "left_arm_action"})
         right_actions = ObsTerm(func=mdp.last_action, params={"action_name": "right_arm_action"})
 
@@ -258,23 +232,21 @@ class ObservationsCfg:
 class EventCfg:
     reset_all = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
-    # 托盘小幅平面随机化，强化策略的泛化能力
     reset_tray_pose = EventTerm(
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
             "pose_range": {
-                "x": (-0.02, 0.02),
-                "y": (-0.02, 0.02),
+                "x": (-0.03, 0.03),
+                "y": (-0.03, 0.03),
                 "z": (0.0, 0.0),
-                "yaw": (-0.05, 0.05),   # ±3° 微旋
+                "yaw": (-0.05, 0.05),
             },
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("tray"),
         },
     )
 
-    # 机器人关节微抖动，避免每个 episode 完全确定性的初态
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -288,202 +260,89 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """全加性奖励。
+    """全加性奖励。主信号（reach / lift / goal）全程激活、不门控；平稳/对称/平滑
+    初始弱，靠课程后期调大。"""
 
-    阶段 A（reach / orient / close）的奖励全程激活，提供从零开始的密集梯度。
-    阶段 B（lift / goal）通过课程从 0 线性激活，避免训练初期"夹未稳就被举升信号
-    带跑"的副作用。
-    """
-
-    # ── A1. 接近：粗 + 精 ───────────────────────────────────────
+    # ── A. 接近：每只手 → 自己那侧的把手（粗 + 精） ───────────────
     left_reach_coarse = RewTerm(
-        func=mdp.reach_grasp_target,
-        weight=2.0,
-        params={
-            "std": 0.15,
-            "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
-            "side": "left",
-            "half_length": HALF_LENGTH,
-            "grasp_z_offset": GRASP_Z_OFFSET,
-        },
+        func=mdp.reach_handle, weight=2.0,
+        params={"std": 0.10, "ee_frame_cfg": _LEFT_EE, "side": "left",
+                "half_grasp_y": HALF_GRASP_Y, "grasp_z_offset": GRASP_Z_OFFSET},
     )
     right_reach_coarse = RewTerm(
-        func=mdp.reach_grasp_target,
-        weight=2.0,
-        params={
-            "std": 0.15,
-            "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
-            "side": "right",
-            "half_length": HALF_LENGTH,
-            "grasp_z_offset": GRASP_Z_OFFSET,
-        },
+        func=mdp.reach_handle, weight=2.0,
+        params={"std": 0.10, "ee_frame_cfg": _RIGHT_EE, "side": "right",
+                "half_grasp_y": HALF_GRASP_Y, "grasp_z_offset": GRASP_Z_OFFSET},
     )
     left_reach_fine = RewTerm(
-        func=mdp.reach_grasp_target_fine,
-        weight=1.0,
-        params={
-            "std": 0.04,
-            "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
-            "side": "left",
-            "half_length": HALF_LENGTH,
-            "grasp_z_offset": GRASP_Z_OFFSET,
-        },
+        func=mdp.reach_handle, weight=1.0,
+        params={"std": 0.03, "ee_frame_cfg": _LEFT_EE, "side": "left",
+                "half_grasp_y": HALF_GRASP_Y, "grasp_z_offset": GRASP_Z_OFFSET},
     )
     right_reach_fine = RewTerm(
-        func=mdp.reach_grasp_target_fine,
-        weight=1.0,
-        params={
-            "std": 0.04,
-            "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
-            "side": "right",
-            "half_length": HALF_LENGTH,
-            "grasp_z_offset": GRASP_Z_OFFSET,
-        },
+        func=mdp.reach_handle, weight=1.0,
+        params={"std": 0.03, "ee_frame_cfg": _RIGHT_EE, "side": "right",
+                "half_grasp_y": HALF_GRASP_Y, "grasp_z_offset": GRASP_Z_OFFSET},
     )
 
-    # ── A2. 从上方接近的几何偏置 ──────────────────────────────
-    left_above_tray = RewTerm(
-        func=mdp.ee_above_tray_penalty,
-        weight=-2.0,
-        params={
-            "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
-            "margin": 0.0,
-        },
-    )
-    right_above_tray = RewTerm(
-        func=mdp.ee_above_tray_penalty,
-        weight=-2.0,
-        params={
-            "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
-            "margin": 0.0,
-        },
-    )
+    # ── B. 姿态偏置（弱）：手朝下 + 夹爪开合轴横跨把手 ─────────────
+    left_hand_down = RewTerm(func=mdp.hand_pointing_down, weight=0.5, params={"hand_cfg": _LEFT_HAND_BODY})
+    right_hand_down = RewTerm(func=mdp.hand_pointing_down, weight=0.5, params={"hand_cfg": _RIGHT_HAND_BODY})
+    left_span_align = RewTerm(func=mdp.gripper_span_align, weight=0.5, params={"hand_cfg": _LEFT_HAND_BODY})
+    right_span_align = RewTerm(func=mdp.gripper_span_align, weight=0.5, params={"hand_cfg": _RIGHT_HAND_BODY})
 
-    # ── A3. 手部朝下 + yaw 与托盘长轴垂直 ─────────────────────
-    left_hand_down = RewTerm(
-        func=mdp.hand_pointing_down,
-        weight=1.5,
-        params={"hand_cfg": _LEFT_HAND_BODY},
-    )
-    right_hand_down = RewTerm(
-        func=mdp.hand_pointing_down,
-        weight=1.5,
-        params={"hand_cfg": _RIGHT_HAND_BODY},
-    )
-    left_hand_yaw = RewTerm(
-        func=mdp.gripper_yaw_align,
-        weight=1.0,
-        params={"hand_cfg": _LEFT_HAND_BODY},
-    )
-    right_hand_yaw = RewTerm(
-        func=mdp.gripper_yaw_align,
-        weight=1.0,
-        params={"hand_cfg": _RIGHT_HAND_BODY},
-    )
-
-    # ── A4. 进入抓取半径后才奖励夹爪闭合 ──────────────────────
-    left_grip_close = RewTerm(
-        func=mdp.gripper_close_when_near,
-        weight=4.0,
+    # ── C. 抓握加分（软、不门控） ─────────────────────────────────
+    grasp_bonus = RewTerm(
+        func=mdp.grasp_bonus, weight=2.0,
         params={
-            "ee_frame_cfg": SceneEntityCfg("left_ee_frame"),
-            "finger_cfg": _LEFT_FINGER_CFG,
-            "side": "left",
+            "left_ee_cfg": _LEFT_EE, "right_ee_cfg": _RIGHT_EE,
+            "left_finger_cfg": _LEFT_FINGER_CFG, "right_finger_cfg": _RIGHT_FINGER_CFG,
+            "half_grasp_y": HALF_GRASP_Y, "grasp_z_offset": GRASP_Z_OFFSET,
             "grasp_radius": GRASP_RADIUS,
-            "target_finger_pos": 0.012,
-            "half_length": HALF_LENGTH,
-            "grasp_z_offset": GRASP_Z_OFFSET,
-        },
-    )
-    right_grip_close = RewTerm(
-        func=mdp.gripper_close_when_near,
-        weight=4.0,
-        params={
-            "ee_frame_cfg": SceneEntityCfg("right_ee_frame"),
-            "finger_cfg": _RIGHT_FINGER_CFG,
-            "side": "right",
-            "grasp_radius": GRASP_RADIUS,
-            "target_finger_pos": 0.012,
-            "half_length": HALF_LENGTH,
-            "grasp_z_offset": GRASP_Z_OFFSET,
         },
     )
 
-    # ── A5. 双手保持托盘长度间距（弱信号） ─────────────────────
-    hand_spacing = RewTerm(
-        func=mdp.hand_spacing,
-        weight=0.5,
-        params={
-            "target_distance": HAND_SPACING_TARGET,
-            "std": 0.15,
-            "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
-            "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
-        },
+    # ── D. 举升（核心，全程激活、不门控） ─────────────────────────
+    lift_height = RewTerm(
+        func=mdp.tray_lift_height, weight=8.0,
+        params={"base_height": TRAY_BASE_HEIGHT, "target_height": TARGET_HEIGHT},
+    )
+    lifted = RewTerm(
+        func=mdp.tray_is_lifted, weight=4.0,
+        params={"minimal_height": MINIMAL_LIFT_HEIGHT},
+    )
+    goal_height_coarse = RewTerm(
+        func=mdp.tray_goal_height, weight=8.0,
+        params={"target_height": TARGET_HEIGHT, "std": 0.10, "minimal_height": MINIMAL_LIFT_HEIGHT},
+    )
+    goal_height_fine = RewTerm(
+        func=mdp.tray_goal_height, weight=4.0,
+        params={"target_height": TARGET_HEIGHT, "std": 0.03, "minimal_height": MINIMAL_LIFT_HEIGHT},
     )
 
-    # ── B1. 抓住后的举升进度（课程） ───────────────────────────
-    lift_progress = RewTerm(
-        func=mdp.lift_progress_when_grasped,
-        weight=0.0,
-        params={
-            "base_height": TRAY_BASE_HEIGHT,
-            "target_height": TARGET_HEIGHT,
-            "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
-            "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
-            "left_finger_cfg": _LEFT_FINGER_CFG,
-            "right_finger_cfg": _RIGHT_FINGER_CFG,
-            "half_length": HALF_LENGTH,
-            "grasp_radius": GRASP_RADIUS,
-            "grasp_z_offset": GRASP_Z_OFFSET,
-            "finger_closed_thresh": 0.025,
-        },
+    # ── E. 平稳 / 对称（初始弱，课程后期调大） ─────────────────────
+    tray_flat = RewTerm(
+        func=mdp.tray_flat, weight=0.5,
+        params={"minimal_height": MINIMAL_LIFT_HEIGHT},
     )
-    goal_height = RewTerm(
-        func=mdp.goal_height_tracking_when_grasped,
-        weight=0.0,
-        params={
-            "target_height": TARGET_HEIGHT,
-            "std": 0.08,
-            "left_ee_cfg": SceneEntityCfg("left_ee_frame"),
-            "right_ee_cfg": SceneEntityCfg("right_ee_frame"),
-            "left_finger_cfg": _LEFT_FINGER_CFG,
-            "right_finger_cfg": _RIGHT_FINGER_CFG,
-            "half_length": HALF_LENGTH,
-            "grasp_radius": GRASP_RADIUS,
-            "grasp_z_offset": GRASP_Z_OFFSET,
-            "finger_closed_thresh": 0.025,
-        },
+    ee_symmetry = RewTerm(
+        func=mdp.ee_height_symmetry, weight=0.5,
+        params={"std": 0.05, "left_ee_cfg": _LEFT_EE, "right_ee_cfg": _RIGHT_EE},
     )
 
-    # ── B2. 平稳性：举升后惩罚倾斜 / 摆动 ─────────────────────
-    tray_tilt = RewTerm(
-        func=mdp.tray_tilt_when_lifted,
-        weight=-2.0,
-        params={"lift_threshold": LIFT_THRESHOLD},
-    )
-    tray_ang_speed = RewTerm(
-        func=mdp.tray_angular_speed_when_lifted,
-        weight=-0.05,
-        params={"lift_threshold": LIFT_THRESHOLD},
-    )
-
-    # ── A6. 控制平滑性 ────────────────────────────────────────
-    # 用 arm-only 版本：跳过二值夹爪两维，避免其无界幅值漂移污染该 L2 惩罚。
+    # ── F. 平滑性（初始弱，课程后期调大） ─────────────────────────
     action_rate = RewTerm(
-        func=mdp.action_rate_l2_arm_only,
-        weight=-1e-4,
+        func=mdp.action_rate_l2_arm_only, weight=-1e-4,
         params={"arm_action_names": ("left_arm_action", "right_arm_action")},
     )
     left_joint_vel = RewTerm(
-        func=mdp.joint_vel_l2,
-        weight=-5e-4,
+        func=mdp.joint_vel_l2, weight=-5e-4,
         params={"asset_cfg": SceneEntityCfg(
             "robot", joint_names=[f"openarm_left_joint{i}" for i in range(1, 8)]
         )},
     )
     right_joint_vel = RewTerm(
-        func=mdp.joint_vel_l2,
-        weight=-5e-4,
+        func=mdp.joint_vel_l2, weight=-5e-4,
         params={"asset_cfg": SceneEntityCfg(
             "robot", joint_names=[f"openarm_right_joint{i}" for i in range(1, 8)]
         )},
@@ -499,33 +358,42 @@ class TerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     tray_dropped = DoneTerm(
         func=mdp.tray_dropped,
-        params={"minimum_height": 0.18, "tray_cfg": SceneEntityCfg("tray")},
+        params={"minimum_height": 0.12, "tray_cfg": SceneEntityCfg("tray")},
     )
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 7. 课程
+# 7. 课程：学会"抓 + 抬"之后，再调大 平稳/对称/平滑 的权重
 # ─────────────────────────────────────────────────────────────────────
 
 @configclass
 class CurriculumCfg:
-    """阶段切换：
+    """``modify_reward_weight`` 在 ``common_step_counter > num_steps`` 时把权重切到目标值
+    （阶跃，非线性）。num_steps 单位是策略步；按 num_steps_per_env=64 估算，
+    8000 步 ≈ 125 次迭代——足够策略先学会抓握与举升，再开始强调平稳与平滑。
 
-    - 前 ~10000 步策略学接近 + 闭合（lift / goal 权重为 0）
-    - 10000 - 25000 步线性激活 lift / goal（≈ 235 iters，比旧版 60000 步快得多）
-    - 之后维持终值
+    注意：lift / reach / goal 等主信号**不在课程里**，从第 0 步就是满权重——这是
+    与旧版（把举升权重从 0 慢慢加，结果一直没激活）最关键的区别。
     """
-    # 注意：`num_steps` 单位是"全局并行环境步" = num_envs × policy_step。
-    # 单卡 4096 env：200k 步 ≈ 49 iter（每 iter 64 step × 4096 env = 262k）
-    # 双卡 4096×2：200k 步 ≈ 24 iter（每 iter 524k）
-    # 也就是 lift / goal 在前 ~25-50 iter 内线性激活到位，之后维持。
-    activate_lift_progress = CurrTerm(
+    bump_tray_flat = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "lift_progress", "weight": 8.0, "num_steps": 200_000},
+        params={"term_name": "tray_flat", "weight": 3.0, "num_steps": 8000},
     )
-    activate_goal_height = CurrTerm(
+    bump_ee_symmetry = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "goal_height", "weight": 10.0, "num_steps": 200_000},
+        params={"term_name": "ee_symmetry", "weight": 1.5, "num_steps": 8000},
+    )
+    bump_action_rate = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "action_rate", "weight": -5e-3, "num_steps": 8000},
+    )
+    bump_left_joint_vel = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "left_joint_vel", "weight": -1e-3, "num_steps": 8000},
+    )
+    bump_right_joint_vel = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "right_joint_vel", "weight": -1e-3, "num_steps": 8000},
     )
 
 
@@ -551,7 +419,7 @@ class BimanualTrayLiftEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.01                       # 100 Hz physics
         self.sim.render_interval = self.decimation
 
-        # PhysX：抓取细瘦物体需要足够的接触迭代
+        # PhysX：抓取细把手 + 双夹爪接触需要足够的接触迭代/容量
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
         self.sim.physx.gpu_total_aggregate_pairs_capacity = 64 * 1024
