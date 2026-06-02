@@ -15,25 +15,23 @@
 """双臂托盘举升任务（关节位置动作空间）具体环境配置。
 
 设计要点：
-1. **托盘资产**改为真正的托盘：扁平板 + 两端把手横杆（单刚体），从
-   ``usds/tray/tray.usda`` 加载。把手 24 mm 的薄边正好落入夹爪 88 mm 开口，
-   从上方下压即可套住、闭合即抓牢，抬升稳定。
-2. **末端 TCP 坐标系**用 FrameTransformer + OffsetCfg(pos=(0, 0, 0.105))，把
-   ``openarm_left/right_hand`` body 的位姿平移到两指中心。
-3. **初始关节姿态**让肩、肘略弯、腕朝下，使两个 TCP 从初态就大致悬在两端把手
-   正上方，缩短 reach 阶段需要探索的距离（关节角均在 USD 硬限位内）。
-4. **二值夹爪**：open=0.044, close=0.0；策略只需在合适时机切换。
+1. **完全自然下垂初态**：全部臂关节 = 0（USD 默认休息位形），夹爪张开；
+2. **托盘**：扁平板 USD，置于中央支架上。
+3. **TCP** 直接跟踪 USD 内 ``openarm_*_ee_tcp`` link。
+4. **二值夹爪**：open=0.044, close=0.0。
 """
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.assets.articulation import ArticulationCfg
 from isaaclab.sensors import FrameTransformerCfg
-from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.utils import configclass
 
 from .. import mdp
-from ..lift_env_cfg import BimanualTrayLiftEnvCfg, TRAY_BASE_HEIGHT
+from ..lift_env_cfg import (
+    BimanualTrayLiftEnvCfg,
+    TRAY_BASE_HEIGHT,
+)
 
 from source.openarm.openarm.tasks.manager_based.openarm_manipulation import (
     OPENARM_ROOT_DIR,
@@ -44,9 +42,10 @@ from source.openarm.openarm.tasks.manager_based.openarm_manipulation.assets.open
 
 
 # ─────────────────────────────────────────────────────────────────────
-# TCP 偏移：从 openarm_*_hand body 原点到两指中心（hand 局部 +Z 指向指尖）
+# TCP：直接使用 USD 里的 ee_tcp link（与 solve_ready_pose.py / 单臂任务一致）。
+# 不要用 hand + 固定 offset——offset 与 ee_tcp body 往往差几厘米，会导致
+# "inspect 看着夹对了、reach/grasp 奖励却在追另一个点"。
 # ─────────────────────────────────────────────────────────────────────
-TCP_OFFSET = (0.0, 0.0, 0.105)
 
 
 @configclass
@@ -55,37 +54,40 @@ class OpenArmTrayLiftEnvCfg(BimanualTrayLiftEnvCfg):
         super().__post_init__()
 
         # ─────────── 机器人 ───────────
-        # 初始关节略弯、腕朝下，让两 TCP 自然落到两端把手正上方，缩短 reach 阶段。
-        # OpenArm USD 硬限位（来自 articulation 校验）：左右臂部分镜像，
-        #   left_joint2  ∈ [-3.316,  0.175]   right_joint2 ∈ [-0.175, 3.316]
-        #   joint4       ∈ [ 0.000,  2.443]   joint6       ∈ [-0.785, 0.785]
-        # 故 joint2 左右取相反符号、joint4/joint6 左右同号，形成镜像姿态。
-        ready_joint_pos = {
+        # 完全自然下垂初态：全部关节角 = 0（USD 默认休息位形），仅夹爪张开。
+        # 不预置任何弯肘/外展——策略从体侧垂臂开始，由 reach 奖励学会伸到托盘。
+        hang_joint_pos = {
             "openarm_left_joint1": 0.0,
-            "openarm_left_joint2": -0.40,
+            "openarm_left_joint2": 0.0,
             "openarm_left_joint3": 0.0,
-            "openarm_left_joint4": 1.20,
+            "openarm_left_joint4": 0.0,
             "openarm_left_joint5": 0.0,
-            "openarm_left_joint6": 0.60,
+            "openarm_left_joint6": 0.0,
             "openarm_left_joint7": 0.0,
             "openarm_right_joint1": 0.0,
-            "openarm_right_joint2": 0.40,
+            "openarm_right_joint2": 0.0,
             "openarm_right_joint3": 0.0,
-            "openarm_right_joint4": 1.20,
+            "openarm_right_joint4": 0.0,
             "openarm_right_joint5": 0.0,
-            "openarm_right_joint6": 0.60,
+            "openarm_right_joint6": 0.0,
             "openarm_right_joint7": 0.0,
             "openarm_left_finger_joint.*": 0.044,
             "openarm_right_finger_joint.*": 0.044,
         }
         self.scene.robot = OPEN_ARM_CFG.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
-            init_state=ArticulationCfg.InitialStateCfg(joint_pos=ready_joint_pos),
+            init_state=ArticulationCfg.InitialStateCfg(joint_pos=hang_joint_pos),
         )
+        # 抬高双臂 PD 刚度：默认 stiffness=80 太软，机械臂伸到托盘高度 (~0.42m) 时
+        # 在重力下会下垂 ~12cm（inspect 实测静置 TCP 掉到 z≈0.24–0.31）。提高刚度让
+        # 机械臂能稳稳把手停在托盘侧面、并在举升时托住托盘。阻尼同步加大以防振荡。
+        self.scene.robot.actuators["openarm_arm"].stiffness = 200.0
+        self.scene.robot.actuators["openarm_arm"].damping = 24.0
 
-        # ─────────── 托盘（带把手的真正托盘，单刚体 USD） ───────────
+        # ─────────── 托盘（扁平板，单刚体 USD） ───────────
         # 几何在 usds/tray/tray.usda 内定义；这里设质量 / 求解器迭代 / 初始位姿。
-        # 初始质心 z = 支架顶 0.20 + 板半厚 0.0125 = TRAY_BASE_HEIGHT(0.2125)。
+        # 初始质心 z = 支架顶 0.33 + 板半厚 0.015 = TRAY_BASE_HEIGHT(0.345)，
+        # 接近双手自然伸展高度（inspect 实测 TCP z≈0.434），便于侧面水平夹取。
         self.scene.tray = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Tray",
             spawn=sim_utils.UsdFileCfg(
@@ -98,7 +100,7 @@ class OpenArmTrayLiftEnvCfg(BimanualTrayLiftEnvCfg):
                     max_linear_velocity=4.0,
                     max_angular_velocity=10.0,
                 ),
-                mass_props=sim_utils.MassPropertiesCfg(mass=0.6),
+                mass_props=sim_utils.MassPropertiesCfg(mass=0.5),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
                 pos=(0.40, 0.0, TRAY_BASE_HEIGHT),
@@ -107,25 +109,24 @@ class OpenArmTrayLiftEnvCfg(BimanualTrayLiftEnvCfg):
         )
 
         # ─────────── 末端 TCP FrameTransformer ───────────
+        # 与 unimanual lift / solve_ready_pose 一致：跟踪 USD 内 ee_tcp link。
         self.scene.left_ee_frame = FrameTransformerCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/openarm_left_hand",
+            prim_path="{ENV_REGEX_NS}/Robot/openarm_body_link",
             debug_vis=False,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/openarm_left_hand",
+                    prim_path="{ENV_REGEX_NS}/Robot/openarm_left_ee_tcp",
                     name="left_ee_tcp",
-                    offset=OffsetCfg(pos=TCP_OFFSET),
                 ),
             ],
         )
         self.scene.right_ee_frame = FrameTransformerCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/openarm_right_hand",
+            prim_path="{ENV_REGEX_NS}/Robot/openarm_body_link",
             debug_vis=False,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/openarm_right_hand",
+                    prim_path="{ENV_REGEX_NS}/Robot/openarm_right_ee_tcp",
                     name="right_ee_tcp",
-                    offset=OffsetCfg(pos=TCP_OFFSET),
                 ),
             ],
         )

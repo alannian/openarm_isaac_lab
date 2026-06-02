@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""双臂托盘举升任务的观测项（重构版）。
+"""双臂托盘举升任务的观测项（侧面抓取版）。
 
-提供策略学习所需的几何线索：TCP 位置、到把手抓取点的相对向量、托盘位姿/水平度/
-速度、手部"朝下"标量。所有 3D 量给在机器人 root 系下（对底座绝对位置不变），
-姿态用轴向投影（避免欧拉角奇异）。
+提供策略学习所需的几何线索：TCP 位置、到侧面抓取点的相对向量、托盘位姿/水平度/
+速度、手部朝向标量。所有 3D 量给在机器人 root 系下（对底座绝对位置不变），
+姿态用轴向投影（避免欧拉角奇异）。手部朝向仅作为观测信息提供给策略，**不进奖励**
+（侧面抓取的最优手腕朝向由 grasp_hold/举升门控的梯度自行学得，不用启发式硬掰）。
 """
 
 from __future__ import annotations
@@ -34,8 +35,9 @@ if TYPE_CHECKING:
 
 
 # 几何默认值（与 rewards.py / tray.usda / lift_env_cfg.py 一致）
-HALF_GRASP_Y = 0.22
-GRASP_Z_OFFSET = 0.035
+#   侧面抓取点在托盘两端 (0, ±0.23, 0)（板中厚处、悬出支架）。
+HALF_GRASP_Y = 0.23
+GRASP_Z_OFFSET = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -56,7 +58,7 @@ def _handle_target_w(
     half_grasp_y: float,
     grasp_z_offset: float,
 ) -> torch.Tensor:
-    """某侧把手抓取点世界坐标 (N, 3)，定义与 rewards._handle_target_w 一致。"""
+    """某侧抓取点世界坐标 (N, 3)，定义与 rewards._handle_target_w 一致。"""
     tray: RigidObject = env.scene[tray_cfg.name]
     pos = tray.data.root_pos_w
     quat = tray.data.root_quat_w
@@ -145,7 +147,7 @@ def ee_to_handle_vector_in_robot_root_frame(
     half_grasp_y: float = HALF_GRASP_Y,
     grasp_z_offset: float = GRASP_Z_OFFSET,
 ) -> torch.Tensor:
-    """从 TCP 指向该侧把手抓取点的位移向量 (N, 3)，root 系。
+    """从 TCP 指向该侧抓取点的位移向量 (N, 3)，root 系。
 
     抓取点与 rewards 中完全一致，让策略直接感知"还差多少"。
     """
@@ -183,9 +185,11 @@ def hand_span_alignment(
     span_axis: int = 1,
     handle_long_axis: int = 0,
 ) -> torch.Tensor:
-    """夹爪开合轴（hand 局部 ±Y）与把手长轴（tray 局部 ±X）垂直的程度 (N, 1) ∈ [0, 1]。
+    """夹爪开合轴（hand 局部 ±Y）与托盘某轴（默认 tray 局部 ±X）的对齐摘要
+    (N, 1) ∈ [0, 1]。
 
-    越接近 1 表示越正交（越正确：夹爪正好横跨把手细杆闭合）。
+    仅作为手腕朝向的观测线索提供给策略（不进奖励）；越接近 1 表示开合轴越垂直于
+    该参考轴。
     """
     robot: Articulation = env.scene[hand_cfg.name]
     hand_quat = robot.data.body_quat_w[:, hand_cfg.body_ids[0]]

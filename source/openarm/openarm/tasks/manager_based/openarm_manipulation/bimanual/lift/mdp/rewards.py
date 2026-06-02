@@ -12,27 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""双臂托盘举升任务的奖励项（彻底重构版）。
+"""双臂托盘举升任务的奖励项（侧面抓取 + 分阶段课程 + 抓握门控版）。
 
-核心设计原则（针对旧版"练不出来"的根因）：
+为什么这样设计（针对前两版的两个失败）：
 
-1. **举升奖励永不门控**。旧版把举升奖励乘以"双手都进半径且都闭合"的硬门控，
-   随机策略几乎采不到 → 永远没有举升梯度 → 收敛到"在托盘上方悬停"的局部最优。
-   新版照搬仓库里**能跑通的单臂 lift** 的配方：
-     - `reach`（密集，全程有梯度，把手 → 把手抓取点）
-     - `tray_lift_height`（**密集、不门控**，托盘升高即线性给分，是主力信号）
-     - `tray_is_lifted`（越过最小高度的台阶奖励）
-     - `tray_goal_height`（粗 + 精，向目标高度收敛，仅用"已离台"软门控）
-   夹爪是"为了把托盘举起来而自然学会闭合"的，不需要任何硬门控。
+* v1：举升奖励**硬门控** → 随机策略采不到 → 没有举升梯度 → 收敛到"悬停不抓"。
+* v2：举升奖励**完全不门控** → 策略发现"把托盘推倒/顶竖起来"也能让质心升高
+      从而骗到举升分（截图里托盘被怼成竖直）→ 根本不去抓。
 
-2. **不再有"必须在托盘上方"的反向惩罚**——它和"下探去抓"直接对抗，是旧版把
-   手钉在空中的元凶之一。
+正确做法 = 用户的思路：**先夹住、再抬起**，分阶段：
 
-3. **平稳 / 对称 / 平滑** 这类约束初始给很小的权重，靠课程学习在策略学会
-   "抓 + 抬"之后再调大，避免训练早期梯度冲突。
+阶段 1（先夹住）——主力信号是 ``reach`` + ``grasp_hold``：
+    把两只手带到托盘两端的抓取点并闭合夹爪。**举升奖励权重此时为 0**
+    （由 lift_env_cfg 的课程控制），策略只学"双手稳稳夹住托盘"。
 
-4. 每个 reward 单一职责、范围约 [0, 1]，权重直接体现重要性；几何统一由
-   `_handle_target_w` 定义，避免不同地方语义漂移。
+阶段 2（再抬起）——课程在 N 步后开启举升奖励，且举升奖励 **乘以抓握门控**
+    ``_grasp_gate``（两只手都"靠近抓取点 × 已闭合"才接近 1）：
+        - 真夹住才有举升梯度 → 学会协同抬升；
+        - 不夹只推 → 门控 ≈ 0 → 拿不到举升分 → "推倒作弊"被彻底堵死。
+
+托盘几何（配合新的扁平板 tray.usda）：
+    托盘是一块 0.36×0.50×0.03 的扁平板，两端伸出中央支架之外悬空。夹爪从侧面
+    把一指探到板下、一指压在板上夹住板的两端 → 抬升时下指**托着**板（形封闭），
+    比靠摩擦夹横杆稳得多。抓取点在托盘局部 (0, ±HALF_GRASP_Y, 0)。
 """
 
 from __future__ import annotations
@@ -51,10 +53,12 @@ if TYPE_CHECKING:
 
 # ─────────────────────────────────────────────────────────────────────
 # 几何默认值（与 tray.usda / lift_env_cfg.py 保持一致）
-#   托盘局部系：原点在板中心，长轴 +Y，把手沿 X，把手中心在 (0, ±0.22, +0.035)
+#   托盘局部系：原点在板中心，长轴 +Y。抓取点在两端 (0, ±0.23, 0)，
+#   即板中厚处、距中心 0.23 m（落在悬空的两端，夹爪可从侧面套住板）。
 # ─────────────────────────────────────────────────────────────────────
-HALF_GRASP_Y = 0.22       # 把手中心距托盘中心的 |Y| (m)
-GRASP_Z_OFFSET = 0.035    # 把手中心相对托盘中心的高度 (m)
+HALF_GRASP_Y = 0.23       # 抓取点距托盘中心的 |Y| (m)
+GRASP_Z_OFFSET = 0.0      # 抓取点相对托盘中心的高度 (m)（板中厚处）
+FINGER_OPEN_MAX = 0.044   # 夹爪单指完全张开值；0 = 完全闭合
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -72,10 +76,10 @@ def _handle_target_w(
     half_grasp_y: float,
     grasp_z_offset: float,
 ) -> torch.Tensor:
-    """某侧把手抓取点的世界坐标 (N, 3)。
+    """某侧抓取点的世界坐标 (N, 3)。
 
-    left  → 托盘局部 +Y 端；right → -Y 端；都在板面上方 grasp_z_offset 处。
-    通过托盘四元数旋转局部偏移，确保托盘平移/偏航后抓取点依然正确。
+    left → 托盘局部 +Y 端；right → -Y 端。通过托盘四元数旋转局部偏移，
+    确保托盘平移/偏航后抓取点依然贴在板上。
     """
     tray = _tray(env, tray_cfg)
     pos = tray.data.root_pos_w
@@ -98,6 +102,68 @@ def _finger_open(env: ManagerBasedRLEnv, finger_cfg: SceneEntityCfg) -> torch.Te
     return robot.data.joint_pos[:, finger_cfg.joint_ids].mean(dim=1)
 
 
+def _closing_frac(env: ManagerBasedRLEnv, finger_cfg: SceneEntityCfg) -> torch.Tensor:
+    """闭合比例 (N,) ∈ [0, 1]：完全张开 → 0，完全闭合 → 1。
+
+    仅用于 ``grasp_attempt`` 的**弱引导**（靠近时鼓励尝试闭合），不用于门控——
+    因为它分不清"夹住了"还是"空中闭合"。真实抓握判据见 ``_capture_band``。
+    """
+    open_val = _finger_open(env, finger_cfg)
+    return ((FINGER_OPEN_MAX - open_val) / FINGER_OPEN_MAX).clamp(min=0.0, max=1.0)
+
+
+# 板半厚（夹住 30 mm 板时单指停留的开度）；带通中心。与 tray.usda 的 0.03 厚一致。
+_BOARD_HALF = 0.015
+
+
+def _capture_band(env: ManagerBasedRLEnv, finger_cfg: SceneEntityCfg) -> torch.Tensor:
+    """**真实抓握判据** (N,) ∈ [0, 1]：手指开度被"卡"在板半厚附近 → 1。
+
+    关键物理事实：二值夹爪的目标只有 0（闭）或 0.044（开）两种。
+      - 空中闭合 → 手指一路驱动到 ~0 → 带通 ≈ 0；
+      - 完全张开 → ~0.044 → 带通 ≈ 0；
+      - **只有**当一块板被卡在两指之间时，手指才能稳定停在 ~0.015（既到不了 0，
+        也不在 0.044）→ 带通 ≈ 1。
+    因此"带通持续 ≈ 1" 等价于"板确实被夹在两指之间"，**无法靠空中闭合或从下方
+    顶托伪造**（那两种情况手指都会到 ~0）。带通在 ~[0.010, 0.026] 为平台，容忍
+    夹取略偏心。
+    """
+    open_val = _finger_open(env, finger_cfg)
+    rise = ((open_val - 0.004) / 0.006).clamp(min=0.0, max=1.0)   # 低于 ~0.004 → 0
+    fall = ((0.032 - open_val) / 0.006).clamp(min=0.0, max=1.0)   # 高于 ~0.032 → 0
+    return rise * fall
+
+
+def _capture_quality(
+    env: ManagerBasedRLEnv,
+    ee_cfg: SceneEntityCfg,
+    finger_cfg: SceneEntityCfg,
+    side: str,
+    tray_cfg: SceneEntityCfg,
+    half_grasp_y: float,
+    grasp_z_offset: float,
+    grasp_radius: float,
+) -> torch.Tensor:
+    """单手真实抓握质量 (N,) ∈ [0, 1] = near(TCP→该侧抓取点) × capture_band。
+
+    near 保证"夹在正确的那一端"，capture_band 保证"板真的在两指之间"。两者缺一
+    不可：停在附近但没夹住 → capture_band≈0；夹住了别处 → near≈0。
+    """
+    near = _near(env, ee_cfg, side, tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    return near * _capture_band(env, finger_cfg)
+
+
+def _near(env: ManagerBasedRLEnv, ee_cfg: SceneEntityCfg, side: str,
+          tray_cfg: SceneEntityCfg, half_grasp_y: float, grasp_z_offset: float,
+          grasp_radius: float) -> torch.Tensor:
+    """TCP 落在该侧抓取点附近的程度 (N,) ∈ (0, 1]：1/(1+(d/r)^2)，半径外快速衰减。"""
+    d = torch.norm(
+        _ee_pos_w(env, ee_cfg) - _handle_target_w(env, side, tray_cfg, half_grasp_y, grasp_z_offset),
+        dim=1,
+    )
+    return 1.0 / (1.0 + (d / grasp_radius) ** 2)
+
+
 def _hand_axis_world(env: ManagerBasedRLEnv, hand_cfg: SceneEntityCfg, axis: int) -> torch.Tensor:
     robot: Articulation = env.scene[hand_cfg.name]
     quat = robot.data.body_quat_w[:, hand_cfg.body_ids[0]]
@@ -115,7 +181,36 @@ def _tray_axis_world(env: ManagerBasedRLEnv, tray_cfg: SceneEntityCfg, axis: int
 
 
 # ─────────────────────────────────────────────────────────────────────
-# A. 接近：每只手 → 自己那侧的把手抓取点（密集，全程有梯度）
+# 抓握门控（关键）：两只手都"夹在正确端 × 板真的在两指间" → 接近 1，否则 ≈ 0
+# ─────────────────────────────────────────────────────────────────────
+
+def _grasp_gate(
+    env: ManagerBasedRLEnv,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
+    tray_cfg: SceneEntityCfg,
+    half_grasp_y: float,
+    grasp_z_offset: float,
+    grasp_radius: float,
+) -> torch.Tensor:
+    """双手**真实抓握质量**的乘积 (N,) ∈ [0, 1]。
+
+    单手质量 = near × capture_band（见 ``_capture_quality``）。两手相乘 → **必须
+    左右都真的把板夹在两指之间**门控才接近 1。用作举升奖励的乘子，杜绝两类作弊：
+      - 用手臂从下方顶托抬板（手指空中→0，capture_band≈0 → 门控 0）；
+      - 停在距离合格处但没夹住（capture_band≈0 → 门控 0）。
+    """
+    lq = _capture_quality(env, left_ee_cfg, left_finger_cfg, "left",
+                          tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    rq = _capture_quality(env, right_ee_cfg, right_finger_cfg, "right",
+                          tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    return lq * rq
+
+
+# ─────────────────────────────────────────────────────────────────────
+# A. 接近：每只手 → 自己那侧的抓取点（密集，全程有梯度）
 # ─────────────────────────────────────────────────────────────────────
 
 def reach_handle(
@@ -127,7 +222,7 @@ def reach_handle(
     half_grasp_y: float = HALF_GRASP_Y,
     grasp_z_offset: float = GRASP_Z_OFFSET,
 ) -> torch.Tensor:
-    """tanh 内核：TCP 越接近把手抓取点，奖励越高 (∈ [0, 1])。
+    """tanh 内核：TCP 越接近该侧抓取点，奖励越高 (∈ [0, 1])。
 
     std 大 → 远处也有梯度（coarse）；std 小 → 最后一公里更密集（fine）。
     """
@@ -138,34 +233,107 @@ def reach_handle(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# B. 举升（核心）：不门控的密集高度信号 + 越台阶奖励 + 目标高度跟踪
+# B. 抓握（阶段 1 主力）：grasp_hold = 真实抓握；grasp_attempt = 弱引导闭合
+# ─────────────────────────────────────────────────────────────────────
+
+def grasp_hold(
+    env: ManagerBasedRLEnv,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_grasp_y: float = HALF_GRASP_Y,
+    grasp_z_offset: float = GRASP_Z_OFFSET,
+    grasp_radius: float = 0.09,
+) -> torch.Tensor:
+    """双手**真实抓握质量**的均值 (∈ [0, 1])：0.5·(left_q + right_q)，
+    单手 q = near × capture_band（板真的在两指之间）。
+
+    用均值（而非乘积）让"单手先夹上"也能拿到一半分 → 平滑引导。它是阶段 1 的
+    主力信号，权重明显高于 reach，使"在正确端把板夹进两指"成为该阶段最优策略。
+    **只奖励真实夹住**：空中闭合 / 从下顶托 / 停在附近没夹住，capture_band 都≈0。
+    """
+    lq = _capture_quality(env, left_ee_cfg, left_finger_cfg, "left",
+                          tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    rq = _capture_quality(env, right_ee_cfg, right_finger_cfg, "right",
+                          tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    return 0.5 * (lq + rq)
+
+
+def grasp_attempt(
+    env: ManagerBasedRLEnv,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
+    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_grasp_y: float = HALF_GRASP_Y,
+    grasp_z_offset: float = GRASP_Z_OFFSET,
+    grasp_radius: float = 0.09,
+) -> torch.Tensor:
+    """**弱引导** (∈ [0, 1])：靠近抓取点时鼓励"尝试闭合"= 0.5·Σ near × closing。
+
+    作用是给"在板边把夹爪合上"提供一点密集梯度，加速发现真实抓握（否则
+    capture_band 在抓住前一直是 0，纯靠探索较慢）。权重必须**远小于** grasp_hold，
+    且它**不进举升门控**——所以即便策略"在附近空中闭合"也只能拿到这一点点分，
+    拿不到举升分；真实夹住才同时拿到 grasp_hold + 举升。
+    """
+    def side(ee_cfg, fg_cfg, s):
+        near = _near(env, ee_cfg, s, tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+        return near * _closing_frac(env, fg_cfg)
+    return 0.5 * (side(left_ee_cfg, left_finger_cfg, "left")
+                  + side(right_ee_cfg, right_finger_cfg, "right"))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# C. 举升（阶段 2，**乘抓握门控**）：密集高度 + 越台阶 + 目标高度跟踪
 # ─────────────────────────────────────────────────────────────────────
 
 def tray_lift_height(
     env: ManagerBasedRLEnv,
     base_height: float,
     target_height: float,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_grasp_y: float = HALF_GRASP_Y,
+    grasp_z_offset: float = GRASP_Z_OFFSET,
+    grasp_radius: float = 0.09,
 ) -> torch.Tensor:
-    """**不门控**的线性高度进度 ∈ [0, 1]：托盘 z 从 base → target。
+    """线性高度进度 × 抓握门控 ∈ [0, 1]：托盘 z 从 base→target，且必须真夹住。
 
-    这是逃出"悬停局部最优"的关键——托盘只要被抬高一点点就立刻有正比例奖励，
-    策略一旦偶然抓住并抬起就能得到密集正反馈，从而强化"抓 + 抬"。
+    门控杜绝了"推倒托盘骗高度"的退化解——不夹住时门控 ≈ 0，推得再高也无分。
     """
     tray = _tray(env, tray_cfg)
     z = tray.data.root_pos_w[:, 2]
     span = max(target_height - base_height, 1e-6)
-    return ((z - base_height) / span).clamp(min=0.0, max=1.0)
+    progress = ((z - base_height) / span).clamp(min=0.0, max=1.0)
+    gate = _grasp_gate(env, left_ee_cfg, right_ee_cfg, left_finger_cfg, right_finger_cfg,
+                       tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    return progress * gate
 
 
 def tray_is_lifted(
     env: ManagerBasedRLEnv,
     minimal_height: float,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_grasp_y: float = HALF_GRASP_Y,
+    grasp_z_offset: float = GRASP_Z_OFFSET,
+    grasp_radius: float = 0.09,
 ) -> torch.Tensor:
-    """托盘质心越过 minimal_height 时给 1，否则 0（**不门控**）。"""
+    """托盘越过 minimal_height 的台阶奖励 × 抓握门控 (∈ [0, 1])。"""
     tray = _tray(env, tray_cfg)
-    return (tray.data.root_pos_w[:, 2] > minimal_height).float()
+    lifted = (tray.data.root_pos_w[:, 2] > minimal_height).float()
+    gate = _grasp_gate(env, left_ee_cfg, right_ee_cfg, left_finger_cfg, right_finger_cfg,
+                       tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    return lifted * gate
 
 
 def tray_goal_height(
@@ -173,17 +341,27 @@ def tray_goal_height(
     target_height: float,
     std: float,
     minimal_height: float,
+    left_ee_cfg: SceneEntityCfg,
+    right_ee_cfg: SceneEntityCfg,
+    left_finger_cfg: SceneEntityCfg,
+    right_finger_cfg: SceneEntityCfg,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
+    half_grasp_y: float = HALF_GRASP_Y,
+    grasp_z_offset: float = GRASP_Z_OFFSET,
+    grasp_radius: float = 0.09,
 ) -> torch.Tensor:
-    """tanh 内核：托盘 z 接近 target_height 时奖励 1，仅用"已离台"软门控。"""
+    """tanh 内核：托盘 z 接近 target_height 时奖励 1，× 已离台 × 抓握门控。"""
     tray = _tray(env, tray_cfg)
     z = tray.data.root_pos_w[:, 2]
     is_lifted = (z > minimal_height).float()
-    return is_lifted * (1.0 - torch.tanh((z - target_height).abs() / std))
+    track = 1.0 - torch.tanh((z - target_height).abs() / std)
+    gate = _grasp_gate(env, left_ee_cfg, right_ee_cfg, left_finger_cfg, right_finger_cfg,
+                       tray_cfg, half_grasp_y, grasp_z_offset, grasp_radius)
+    return is_lifted * track * gate
 
 
 # ─────────────────────────────────────────────────────────────────────
-# C. 平稳 / 对称（初始弱，课程后期加大）
+# D. 平稳 / 对称（初始弱，课程后期调大）
 # ─────────────────────────────────────────────────────────────────────
 
 def tray_flat(
@@ -191,10 +369,7 @@ def tray_flat(
     minimal_height: float,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
 ) -> torch.Tensor:
-    """托盘水平度奖励 (∈ [0, 1])：托盘局部 +Z 与世界 +Z 的点积，举起后才计分。
-
-    completely flat → 1；倾斜越大越小。鼓励"平稳举起、保持水平"。
-    """
+    """托盘水平度奖励 (∈ [0, 1])：托盘局部 +Z 与世界 +Z 的点积，举起后才计分。"""
     tray = _tray(env, tray_cfg)
     quat = tray.data.root_quat_w
     x = quat[:, 1]
@@ -210,96 +385,34 @@ def ee_height_symmetry(
     left_ee_cfg: SceneEntityCfg,
     right_ee_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
-    """双手 TCP 等高奖励 (∈ [0, 1])：两手高度差越小越好。
-
-    对称同步施力 → 托盘不偏不倒。全程激活（接近阶段也促使两手同高摆位）。
-    """
+    """双手 TCP 等高奖励 (∈ [0, 1])：两手高度差越小越好 → 对称同步施力、托盘不偏。"""
     lz = _ee_pos_w(env, left_ee_cfg)[:, 2]
     rz = _ee_pos_w(env, right_ee_cfg)[:, 2]
     return 1.0 - torch.tanh((lz - rz).abs() / std)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# D. 抓握辅助（**加分项，绝不门控**）：靠近把手时奖励闭合夹爪
-# ─────────────────────────────────────────────────────────────────────
-
-def grasp_bonus(
+def tray_ang_vel_penalty(
     env: ManagerBasedRLEnv,
-    left_ee_cfg: SceneEntityCfg,
-    right_ee_cfg: SceneEntityCfg,
-    left_finger_cfg: SceneEntityCfg,
-    right_finger_cfg: SceneEntityCfg,
+    minimal_height: float,
     tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
-    half_grasp_y: float = HALF_GRASP_Y,
-    grasp_z_offset: float = GRASP_Z_OFFSET,
-    grasp_radius: float = 0.08,
 ) -> torch.Tensor:
-    """软加分 (∈ [0, 1])：每只手"靠近把手 × 已闭合"的乘积，两侧求平均。
-
-    near = 1/(1+(d/r)^2) 在抓取半径外快速衰减；closed = 1 - tanh(open/0.015)。
-    远离把手时几乎为 0 → 不会鼓励"全程闭合"的退化解；它只是加速"在正确位置
-    闭合夹爪"的发现，**不作为举升奖励的门控**。
-    """
-    def side_term(ee_cfg: SceneEntityCfg, finger_cfg: SceneEntityCfg, side: str) -> torch.Tensor:
-        d = torch.norm(
-            _ee_pos_w(env, ee_cfg) - _handle_target_w(env, side, tray_cfg, half_grasp_y, grasp_z_offset),
-            dim=1,
-        )
-        near = 1.0 / (1.0 + (d / grasp_radius) ** 2)
-        closed = 1.0 - torch.tanh(_finger_open(env, finger_cfg) / 0.015)
-        return near * closed
-
-    left = side_term(left_ee_cfg, left_finger_cfg, "left")
-    right = side_term(right_ee_cfg, right_finger_cfg, "right")
-    return 0.5 * (left + right)
+    """托盘角速度 L2（仅举起后计），配合 tray_flat 抑制摇摆。"""
+    tray = _tray(env, tray_cfg)
+    lifted = (tray.data.root_pos_w[:, 2] > minimal_height).float()
+    ang = tray.data.root_ang_vel_w
+    return lifted * torch.sum(torch.square(ang), dim=1)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# E. 姿态偏置（弱）：手朝下 + 夹爪开合轴横跨把手长轴
-# ─────────────────────────────────────────────────────────────────────
-
-def hand_pointing_down(
-    env: ManagerBasedRLEnv,
-    hand_cfg: SceneEntityCfg,
-    forward_axis: int = 2,
-) -> torch.Tensor:
-    """手部 forward 轴（hand 局部 +Z）指向世界 -Z 的程度 (∈ [0, 1])。
-
-    偏置"从上方下压抓把手"的姿态；弱权重，避免压制举升主信号。
-    """
-    axis_w = _hand_axis_world(env, hand_cfg, forward_axis)
-    return (-axis_w[:, 2]).clamp(min=0.0, max=1.0)
-
-
-def gripper_span_align(
-    env: ManagerBasedRLEnv,
-    hand_cfg: SceneEntityCfg,
-    tray_cfg: SceneEntityCfg = SceneEntityCfg("tray"),
-    span_axis: int = 1,
-    handle_long_axis: int = 0,
-) -> torch.Tensor:
-    """夹爪开合轴（hand 局部 ±Y）与把手长轴（tray 局部 ±X）垂直的程度 (∈ [0, 1])。
-
-    把手是沿 X 的细横杆，平行夹爪要横跨它闭合 → span ⟂ handle_long →
-    |span · handle_long| ≈ 0 → 奖励 1 - |·|。
-    """
-    span_w = _hand_axis_world(env, hand_cfg, span_axis)
-    long_w = _tray_axis_world(env, tray_cfg, handle_long_axis)
-    dot = (span_w * long_w).sum(dim=1).abs()
-    return (1.0 - dot).clamp(min=0.0, max=1.0)
-
-
-# ─────────────────────────────────────────────────────────────────────
-# F. 选择性 action-rate：只惩罚双臂关节维度，跳过二值夹爪
+# E. 选择性 action-rate：只惩罚双臂关节维度，跳过二值夹爪
 # ─────────────────────────────────────────────────────────────────────
 
 def action_rate_l2_arm_only(
     env: ManagerBasedRLEnv,
     arm_action_names: tuple[str, ...] = ("left_arm_action", "right_arm_action"),
 ) -> torch.Tensor:
-    """对相邻两步 raw action 的 L2 变化做平滑性惩罚，但仅覆盖给定的臂关节动作项，
-    跳过 ``BinaryJointPositionAction`` —— 后者 raw 幅值对环境无梯度，纳入会无界漂移
-    并把 critic 训飞（value_loss → inf）。
+    """对相邻两步 raw action 的 L2 变化做平滑性惩罚，仅覆盖臂关节动作项，
+    跳过 ``BinaryJointPositionAction``（其 raw 幅值对环境无梯度，纳入会把 critic 训飞）。
     """
     am = env.action_manager
     selected = set(arm_action_names)
@@ -313,5 +426,4 @@ def action_rate_l2_arm_only(
     if not indices:
         return torch.zeros(env.num_envs, device=env.device)
     idx = torch.as_tensor(indices, device=am.action.device, dtype=torch.long)
-    diff = am.action.index_select(1, idx) - am.prev_action.index_select(1, idx)
-    return torch.sum(torch.square(diff), dim=1)
+    return torch.sum(torch.square(am.action[:, idx] - am.prev_action[:, idx]), dim=1)
