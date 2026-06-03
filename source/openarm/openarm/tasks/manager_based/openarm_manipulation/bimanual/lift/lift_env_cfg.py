@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""双臂托盘举升任务顶层配置（自然初态 + 四阶段课程）。
+"""双臂托盘举升任务顶层配置（ready 初态 + 分阶段课程）。
 
-任务：两个 7-DoF OpenArm 机械臂从**自然下垂**初态出发，先到达托盘两端抓取点，
-再竖直骑夹板端、协同举升并保持托盘平稳。
+任务：两个 7-DoF OpenArm 从 **solve_ready_pose 竖直骑夹初态** 出发（TCP 已在抓取点），
+学会有抓握门控的协同举升并保持托盘平稳。
 
-四阶段课程（详见 CurriculumCfg）：
-    1. 到达（reach）—— 双臂从下垂姿态伸到抓取点附近；
-    2. 夹住（grasp）—— grasp_hold / grasp_attempt；
-    3. 抬起（lift）—— 门控举升奖励；
-    4. 平稳（stability）—— 托盘水平 + 低速 + 对称/平滑。
+课程（详见 CurriculumCfg，与 2026-06-01_12-35-30 训练一致）：
+    - 起步即 reach + grasp_hold / grasp_attempt；
+    - 10000 策略步后开启门控举升；
+    - 28000 步后调大平稳/对称/平滑。
 """
 
 from dataclasses import MISSING
@@ -290,13 +289,13 @@ class RewardsCfg:
                 "half_grasp_y": HALF_GRASP_Y, "grasp_z_offset": GRASP_Z_OFFSET},
     )
 
-    # ── B. 抓握（阶段 2 开启，初始权重 0） ────────────────────────
+    # ── B. 抓握（训练初即开启，与 2026-06-01 run 一致） ─────────────
     grasp_hold = RewTerm(
-        func=mdp.grasp_hold, weight=0.0,
+        func=mdp.grasp_hold, weight=6.0,
         params=dict(_GRASP_CFGS),
     )
     grasp_attempt = RewTerm(
-        func=mdp.grasp_attempt, weight=0.0,
+        func=mdp.grasp_attempt, weight=1.5,
         params=dict(_GRASP_CFGS),
     )
 
@@ -326,15 +325,11 @@ class RewardsCfg:
         params={"minimal_height": MINIMAL_LIFT_HEIGHT},
     )
     ee_symmetry = RewTerm(
-        func=mdp.ee_height_symmetry, weight=0.3,
+        func=mdp.ee_height_symmetry, weight=0.5,
         params={"std": 0.05, "left_ee_cfg": _LEFT_EE, "right_ee_cfg": _RIGHT_EE},
     )
-    tray_ang_vel = RewTerm(
-        func=mdp.tray_ang_vel_penalty, weight=0.0,
-        params={"minimal_height": MINIMAL_LIFT_HEIGHT},
-    )
 
-    # ── E. 平滑性（初始弱，课程阶段 3 调大） ──────────────────────
+    # ── E. 平滑性（初始弱，课程后期调大） ──────────────────────────
     action_rate = RewTerm(
         func=mdp.action_rate_l2_arm_only, weight=-1e-4,
         params={"arm_action_names": ("left_arm_action", "right_arm_action")},
@@ -372,68 +367,48 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    """四阶段课程（自然初态 → 到达 → 夹住 → 抬起 → 平稳）。
+    """分阶段课程（与 logs/.../2026-06-01_12-35-30 训练快照一致）。
 
     num_steps 为策略步；num_steps_per_env=64 → 步数/64 ≈ iteration。
-
-      阶段 1（0  ~ 15000 步, ≈0~234 iter）：**仅 reach**（grasp/lift 权重=0），
-            从自然下垂学会伸到抓取点。
-      阶段 2（>15000 步, ≈234 iter 起）：开启 grasp_hold + grasp_attempt。
-      阶段 3（>35000 步, ≈547 iter 起）：开启门控举升 4 项。
-      阶段 4（>55000 步, ≈859 iter 起）：调大 平稳/对称/平滑。
     """
-    # ── 阶段 2：开启抓握 ───────────────────────────────────────────
-    enable_grasp_hold = CurrTerm(
-        func=mdp.modify_reward_weight,
-        params={"term_name": "grasp_hold", "weight": 6.0, "num_steps": 15000},
-    )
-    enable_grasp_attempt = CurrTerm(
-        func=mdp.modify_reward_weight,
-        params={"term_name": "grasp_attempt", "weight": 1.5, "num_steps": 15000},
-    )
-
-    # ── 阶段 3：开启（已门控的）举升奖励 ──────────────────────────
+    # ── 开启门控举升（≈ iter 156 起） ─────────────────────────────
     enable_lift_height = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "lift_height", "weight": 8.0, "num_steps": 35000},
+        params={"term_name": "lift_height", "weight": 8.0, "num_steps": 10000},
     )
     enable_lifted = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "lifted", "weight": 4.0, "num_steps": 35000},
+        params={"term_name": "lifted", "weight": 4.0, "num_steps": 10000},
     )
     enable_goal_coarse = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "goal_height_coarse", "weight": 8.0, "num_steps": 35000},
+        params={"term_name": "goal_height_coarse", "weight": 8.0, "num_steps": 10000},
     )
     enable_goal_fine = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "goal_height_fine", "weight": 4.0, "num_steps": 35000},
+        params={"term_name": "goal_height_fine", "weight": 4.0, "num_steps": 10000},
     )
 
-    # ── 阶段 4：平稳（水平 + 对称 + 平滑） ───────────────────────
+    # ── 平稳 / 对称 / 平滑（≈ iter 437 起） ──────────────────────
     bump_tray_flat = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "tray_flat", "weight": 5.0, "num_steps": 55000},
-    )
-    bump_tray_ang_vel = CurrTerm(
-        func=mdp.modify_reward_weight,
-        params={"term_name": "tray_ang_vel", "weight": -2e-3, "num_steps": 55000},
+        params={"term_name": "tray_flat", "weight": 3.0, "num_steps": 28000},
     )
     bump_ee_symmetry = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "ee_symmetry", "weight": 2.0, "num_steps": 55000},
+        params={"term_name": "ee_symmetry", "weight": 1.5, "num_steps": 28000},
     )
     bump_action_rate = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "action_rate", "weight": -5e-3, "num_steps": 55000},
+        params={"term_name": "action_rate", "weight": -5e-3, "num_steps": 28000},
     )
     bump_left_joint_vel = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "left_joint_vel", "weight": -1e-3, "num_steps": 55000},
+        params={"term_name": "left_joint_vel", "weight": -1e-3, "num_steps": 28000},
     )
     bump_right_joint_vel = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "right_joint_vel", "weight": -1e-3, "num_steps": 55000},
+        params={"term_name": "right_joint_vel", "weight": -1e-3, "num_steps": 28000},
     )
 
 
@@ -455,7 +430,7 @@ class BimanualTrayLiftEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         self.decimation = 2
-        self.episode_length_s = 10.0
+        self.episode_length_s = 8.0
         self.sim.dt = 0.01                       # 100 Hz physics
         self.sim.render_interval = self.decimation
 

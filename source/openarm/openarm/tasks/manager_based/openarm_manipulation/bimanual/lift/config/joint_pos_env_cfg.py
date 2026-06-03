@@ -15,7 +15,8 @@
 """双臂托盘举升任务（关节位置动作空间）具体环境配置。
 
 设计要点：
-1. **完全自然下垂初态**：全部臂关节 = 0（USD 默认休息位形），夹爪张开；
+1. **ready 初态**：``solve_ready_pose.py`` 竖直骑夹解（TCP 已在托盘两端抓取点附近），
+   与 ``2026-06-01_12-35-30`` 训练 run 一致；动作 ``use_default_offset=True`` 绕此姿态。
 2. **托盘**：扁平板 USD，置于中央支架上。
 3. **TCP** 直接跟踪 USD 内 ``openarm_*_ee_tcp`` link。
 4. **二值夹爪**：open=0.044, close=0.0。
@@ -54,29 +55,29 @@ class OpenArmTrayLiftEnvCfg(BimanualTrayLiftEnvCfg):
         super().__post_init__()
 
         # ─────────── 机器人 ───────────
-        # 完全自然下垂初态：全部关节角 = 0（USD 默认休息位形），仅夹爪张开。
-        # 不预置任何弯肘/外展——策略从体侧垂臂开始，由 reach 奖励学会伸到托盘。
-        hang_joint_pos = {
-            "openarm_left_joint1": 0.0,
-            "openarm_left_joint2": 0.0,
-            "openarm_left_joint3": 0.0,
-            "openarm_left_joint4": 0.0,
-            "openarm_left_joint5": 0.0,
-            "openarm_left_joint6": 0.0,
-            "openarm_left_joint7": 0.0,
-            "openarm_right_joint1": 0.0,
-            "openarm_right_joint2": 0.0,
-            "openarm_right_joint3": 0.0,
-            "openarm_right_joint4": 0.0,
-            "openarm_right_joint5": 0.0,
-            "openarm_right_joint6": 0.0,
-            "openarm_right_joint7": 0.0,
+        # solve_ready_pose 竖直骑夹解（2026-06-01_12-35-30 训练快照）。
+        # 左右臂分别求解，关节角不对称属正常。
+        ready_joint_pos = {
+            "openarm_left_joint1": -0.167,
+            "openarm_left_joint2": -0.425,
+            "openarm_left_joint3": 0.275,
+            "openarm_left_joint4": 0.854,
+            "openarm_left_joint5": 1.036,
+            "openarm_left_joint6": 0.405,
+            "openarm_left_joint7": -0.261,
+            "openarm_right_joint1": 0.143,
+            "openarm_right_joint2": -0.057,
+            "openarm_right_joint3": 0.092,
+            "openarm_right_joint4": 1.073,
+            "openarm_right_joint5": -1.538,
+            "openarm_right_joint6": -0.071,
+            "openarm_right_joint7": -0.353,
             "openarm_left_finger_joint.*": 0.044,
             "openarm_right_finger_joint.*": 0.044,
         }
         self.scene.robot = OPEN_ARM_CFG.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
-            init_state=ArticulationCfg.InitialStateCfg(joint_pos=hang_joint_pos),
+            init_state=ArticulationCfg.InitialStateCfg(joint_pos=ready_joint_pos),
         )
         # 抬高双臂 PD 刚度：默认 stiffness=80 太软，机械臂伸到托盘高度 (~0.42m) 时
         # 在重力下会下垂 ~12cm（inspect 实测静置 TCP 掉到 z≈0.24–0.31）。提高刚度让

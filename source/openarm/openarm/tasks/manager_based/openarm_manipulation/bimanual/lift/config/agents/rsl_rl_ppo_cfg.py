@@ -23,15 +23,14 @@ from isaaclab.utils import configclass
 
 @configclass
 class OpenArmTrayLiftPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """PPO 设置（自然初态 + 四阶段课程版）：
+    """PPO 设置（ready 初态 + 2026-06-01 课程版）：
 
     - 动作维 16，观测维 ~78，网络略深。
-    - episode 10 s ≈ 500 policy steps（从下垂到抓取点需更长时间）。
-    - num_steps_per_env=64 → 课程阶段切换见 lift_env_cfg.CurriculumCfg。
-    - 建议 max_iterations=8000~10000 以跑完四阶段课程。
+    - episode 8 s ≈ 400 policy steps。
+    - num_steps_per_env=64 → 举升课程 10000 步、平稳 28000 步。
     """
     num_steps_per_env = 64
-    max_iterations = 8000
+    max_iterations = 5000
     save_interval = 100
     experiment_name = "openarm_bi_tray_lift"
     run_name = ""
